@@ -1,0 +1,14 @@
+ipython
+xarray
+h5netcdf
+odfpy
+pyarrow
+pytest
+rasterio
+xdem
+gdal
+graphviz
+zarr
+mypy
+requests
+cdsapi
