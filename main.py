@@ -19,6 +19,9 @@ import pandas as pd
 import shapely.geometry
 import requests
 import concurrent.futures
+import shutil
+import warnings
+import tempfile
 
 
 class NumpyArrayEncoder(json.JSONEncoder):
@@ -197,6 +200,34 @@ def get_strips() -> gpd.GeoDataFrame:
 
     strips.to_feather(output_path)
     return strips
+
+
+def download_arcticdem(dem_data: pd.Series):
+    data_dir = get_data_dir()
+    ad_dir = data_dir.joinpath("ArcticDEM")
+    
+    filepaths = []
+    for kind in ["dem", "matchtag"]:
+        filepath = ad_dir.joinpath(os.path.basename(dem_data[kind]))
+        if not filepath.is_file():
+            with requests.get(dem_data[kind], stream=True) as request:
+                if request.status_code != 200:
+                    raise ValueError(f"{request.status_code=} {request.content=}")
+
+                
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    
+                    temp_path = Path(temp_dir).joinpath("temp.tif")
+                    with open(temp_path, "wb") as outfile:
+                        shutil.copyfileobj(request.raw, outfile)
+
+                    shutil.move(temp_path,filepath) 
+
+        filepaths.append(filepath)
+
+    return filepaths[0], filepaths[1]
+
+    
 
 
 def get_xdem_dem_co() -> dict[str, str]:
@@ -619,7 +650,7 @@ def coregister(dem_path: Path, verbose: bool = True):
     del stable_terrain_mask
     del ref_dem
     if verbose:
-        print(f"{now_time()}: Finished co-registration")
+        print(f"{now_time()}: Finished co-registration. Transforming DEM")
 
     out_meta = output_path.with_suffix(".json")
     metadata = []
@@ -643,6 +674,8 @@ def coregister(dem_path: Path, verbose: bool = True):
     if verbose:
         print(f"{now_time()}: Saved {output_path.name}")
 
+    return output_path
+
 
 def generate_difference(dem_path: Path, verbose: bool = False):
 
@@ -664,11 +697,69 @@ def generate_difference(dem_path: Path, verbose: bool = False):
     return output_path
 
 
+def median_stack():
+
+    temp_dir = get_temp_dir()
+    dh_dir = temp_dir.joinpath("dh")
+
+    bounds = rio.coords.BoundingBox(535177.5, 8666322.5,547662.5, 8678382.5)
+
+    start_date = pd.Timestamp("2009-07-25")
+
+    output_data = {}
+    dhs = []
+
+    filepaths = list(dh_dir.glob("*_dh.tif"))
+    for filepath in tqdm(filepaths):
+
+        date = pd.to_datetime(filepath.stem.split("_")[3], format="%Y%m%d")
+
+        #if date.year < 2020:
+        #    continue
+
+        year_diff = (date - start_date).total_seconds() / (3600 * 24 * 365.24)
+
+        with rio.open(filepath) as raster:
+            window = rio.windows.from_bounds(*bounds, transform=raster.transform)
+            output_data["transform"] = rio.windows.transform(window, raster.transform)
+            output_data["crs"] = raster.crs
+
+            dhs.append(np.clip(raster.read(1, window=window, masked=True).filled(np.nan) / year_diff, -4, 4))
+
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        median = np.nanmedian(dhs, axis=0)
+
+    plt.imshow(median, cmap="coolwarm_r", vmin=-3, vmax=3)
+
+    with rio.open(temp_dir.joinpath("median.tif"), "w", driver="GTiff", width=median.shape[1], height=median.shape[0], count=1, crs=output_data["crs"], transform=output_data["transform"], dtype=median.dtype, nodata=-9999, compress="deflate", tiled=True) as raster:
+        raster.write(np.where(np.isfinite(median), median, -9999), 1)
+    plt.show()
+
+            
+
+        
+
+    
+    
+
+
 def main():
 
-    dem_paths = Path("data/ArticDEM/").glob("*_dem.tif")
+    strips = get_strips()
 
-    for dem_path in dem_paths:
+    # Drønbreen
+    poi = shapely.geometry.box(538286, 8669555,544315,8675416)
+
+    strips = strips[strips.intersects(poi)].sort_values("start_datetime", ascending=False)
+
+
+    #dem_paths = Path("data/ArcticDEM/").glob("*_dem.tif")
+
+    for _, dem_data in strips.iterrows():
+        print(f"{dem_data['title']}")
+        dem_path, _ = download_arcticdem(dem_data)
         dem_coreg = coregister(dem_path=dem_path)
         generate_difference(dem_coreg)
 
