@@ -22,6 +22,8 @@ import concurrent.futures
 import shutil
 import warnings
 import tempfile
+import threading
+import random
 
 
 class NumpyArrayEncoder(json.JSONEncoder):
@@ -726,7 +728,6 @@ def median_stack():
 
             dhs.append(np.clip(raster.read(1, window=window, masked=True).filled(np.nan) / year_diff, -4, 4))
 
-
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", category=RuntimeWarning)
         median = np.nanmedian(dhs, axis=0)
@@ -738,33 +739,158 @@ def median_stack():
     plt.show()
 
             
+def big_median_stack(year=2021, n_threads: int | None = None, verbose: bool = True):
 
+    temp_dir = get_temp_dir()
+    dh_dir = temp_dir.joinpath("dh")
+    output_path = dh_dir.joinpath(f"median_dhdt_{year}.tif")
+
+    start_date = pd.Timestamp("2009-07-25")
+
+    res = get_res()
+    shape = get_shape(res=res)
+    bounds = get_bounds(res=res)
+    transform = get_transform(res=res)
+    crs = get_crs()
+
+    block_size = [512] * 2
+    start_date = pd.Timestamp("2009-07-25")
+    v_clip = 150 / (2021 - 2009)
+
+    strips = get_strips()
+
+    dh_files = list(dh_dir.glob(f"*{year}*_dh.tif"))
+    titles = {dh_path.stem[:dh_path.stem.index("_seg") + 5]: dh_path for dh_path in dh_files}
+
+    locks = {path: threading.Lock() for path in titles.values()}
+
+    write_lock = threading.Lock()
+    stack = np.zeros(shape, dtype="float32") - 9999
+
+    window_infos = []
+    for col_off in np.arange(0, shape[1], step=block_size[0]):
+        for row_off in np.arange(0, shape[0], step=block_size[1]):
+            width = min(shape[1] - col_off, block_size[0])
+            height = min(shape[0] - row_off, block_size[1])
+
+            window = rio.windows.Window(col_off, row_off, width, height)
+
+            win_bounds = rio.windows.bounds(window, transform=transform)
+
+            overlapping_strips = strips[strips.intersects(shapely.geometry.box(*win_bounds))]
+
+            paths = []
+            for title in overlapping_strips["title"].values:
+                if title not in titles:
+                    continue
+                paths.append((titles[title], locks[titles[title]]))
+
+            if len(paths) == 0:
+                continue
+
+            window_infos.append({"window": window, "paths": paths})
+
+    # Shuffle it to reduce the chance that multiple threads wait to read the same file
+    random.shuffle(window_infos)
+
+    def process(window_info: list[dict[str, rio.windows.Window | tuple[Path, threading.Lock]]], progress_bar: tqdm | None = None) -> None:
+
+        window: rio.windows.Window = window_info["window"]
+
+        data = []
+
+        for path, lock in window_info["paths"]:
+            date = pd.to_datetime(path.stem.split("_")[3], format="%Y%m%d")
+
+
+            year_diff = (date - start_date).total_seconds() / (3600 * 24 * 365.24)
+
+            with lock:
+                with rio.open(path) as raster:
+
+                    data.append(np.clip(raster.read(1, window=window, masked=True).filled(np.nan) / year_diff, -v_clip, v_clip))
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", "All-NaN slice")
+            median = np.nanmedian(data, axis=0)
+        del data
+
+        if np.count_nonzero(np.isfinite(median)) == 0:
+            progress_bar.update()
+            return median
+
+        #median[~np.isfinite(median)] = -9999
+
+        with write_lock:
+            #print(window.row_off, window.row_off + window.height, window.col_off,window.col_off + window.width)
+            stack[window.row_off:window.row_off + window.height, window.col_off:window.col_off + window.width] = median
+
+        progress_bar.update()
+        return median
+            
         
+            
+    with tqdm(total=len(window_infos), desc="Calculating median blocks", smoothing=0.1) as progress_bar:
+        if n_threads == 1:
+            for window_info in window_infos:
+                process(window_info=window_info, progress_bar=progress_bar)
+        else:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=n_threads) as executor:
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore", "All-NaN slice")
+                    list(executor.map(lambda wi: process(wi, progress_bar=progress_bar), window_infos))
+
+
+    if verbose:
+        print(f"Writing {output_path.name}")
+    with rio.open(output_path, "w", "GTiff", width=shape[1], height=shape[0], count=1, crs=crs, transform=transform, dtype=stack.dtype, nodata=-9999, compress="deflate", tiled=True, zlevel=12) as raster:
+        raster.write(np.where(np.isfinite(stack), stack, -9999), 1)
+        
+    #windows = np.ravel([[rio.windows.Window(col_off, row_off, min(shape[1] - col_off, block_size[0]), min(shape[0] - row_off, block_size[1])) for col_off in np.arange(0, shape[1], step=block_size[0])] for row_off in np.arange(0, shape[0], step=block_size[1])])
+        
+
+def process_all():
+    
+    strips = get_strips()
+
+    # Drønbreen
+    #poi = shapely.geometry.box(538286, 8669555,544315,8675416)
+    # All of Nordenskiöld Land
+    poi = shapely.geometry.box(*get_bounds())
+
+    # Remove the northern part of Isfjorden
+    poi = poi.difference(shapely.geometry.box(435428,8679301,497701,8714978))
+
+    failures_file = Path("failures.csv")
+
+    strips = strips[strips.intersects(poi)].sort_values("start_datetime", ascending=True)
+    if failures_file.is_file():
+        failures = pd.read_csv(failures_file, names=["title", "exception"])
+        strips = strips[~strips["title"].isin(failures["title"])]
+
+    with tqdm(total=strips.shape[0]) as progress_bar:
+        for _, dem_data in strips.iterrows():
+
+            if dem_data["title"] == "SETSM_s2s041_W1W2_20210828_10200100B678AF00_10300100C56FE600_2m_lsf_seg3":
+                continue
+            progress_bar.set_description(f"Processing {dem_data['title']}")
+            dem_path, _ = download_arcticdem(dem_data)
+            try:
+                dem_coreg = coregister(dem_path=dem_path, verbose=False)
+            except Exception as exception:
+                with open("failures.csv", "a+") as outfile:
+                    outfile.write(dem_data['title'] + ',"' + str(exception).replace('\n', ' ') + '"\n')
+            generate_difference(dem_coreg, verbose=False)
+            progress_bar.update()
 
     
     
 
 
 def main():
+    process_all()
 
-    strips = get_strips()
-
-    # Drønbreen
-    poi = shapely.geometry.box(538286, 8669555,544315,8675416)
-
-    strips = strips[strips.intersects(poi)].sort_values("start_datetime", ascending=False)
-
-
-    #dem_paths = Path("data/ArcticDEM/").glob("*_dem.tif")
-
-    for _, dem_data in strips.iterrows():
-        print(f"{dem_data['title']}")
-        dem_path, _ = download_arcticdem(dem_data)
-        dem_coreg = coregister(dem_path=dem_path)
-        generate_difference(dem_coreg)
-
-    # dem0 = Path("data/SETSM_s2s041_WV01_20210705_10200100B32D1400_10200100B37B2C00_2m_lsf_seg2_dem.tif")
-    # dem1 = Path("data/ArticDEM/SETSM_s2s041_WV01_20210625_10200100B385AF00_10200100B3AF3500_2m_lsf_seg1_dem.tif")
+    #median_stack()
 
 
 if __name__ == "__main__":
