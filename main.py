@@ -53,7 +53,8 @@ def get_data_urls():
                 "NP_S0_DTM5_2008_13652_33.zip",
                 "NP_S0_DTM5_2009_13824_33.zip",
                 "NP_S0_DTM5_2009_13835_33.zip",
-                "NP_S0_DTM5_2010_13923_33.zip" "NP_S0_DTM5_2010_13836_33.zip",
+                "NP_S0_DTM5_2010_13923_33.zip",
+                "NP_S0_DTM5_2010_13836_33.zip",
                 "NP_S0_DTM5_2011_25162_33.zip",
                 "NP_S0_DTM5_2012_25235_33.zip",
             ]
@@ -131,7 +132,6 @@ def get_strips() -> gpd.GeoDataFrame:
             files = files[files["title"].str.contains("SETSM")]
             cell_files.append(files)
 
-
     files = pd.concat(cell_files).drop_duplicates("title").sort_values("title")
 
     strip_metadata_dir = filepath.parent.joinpath("per-strip")
@@ -147,7 +147,8 @@ def get_strips() -> gpd.GeoDataFrame:
         infos.append((strip_filepath, row["href"]))
 
     filepaths = list(filepaths)
-    def download(info, progress_bar = None):
+
+    def download(info, progress_bar=None):
         strip_filepath, url = info
 
         response = requests.get(url)
@@ -160,17 +161,15 @@ def get_strips() -> gpd.GeoDataFrame:
 
         if progress_bar is not None:
             progress_bar.update()
-        
 
     if len(infos) > 0:
-        
-        #for info in tqdm(infos, desc="Downloading metadata"):
+
+        # for info in tqdm(infos, desc="Downloading metadata"):
         #    download(info)
-            
+
         with tqdm(total=len(infos), desc="Downloading metadata") as progress_bar:
             with concurrent.futures.ThreadPoolExecutor() as executor:
-               list(executor.map(lambda i: download(i, progress_bar), infos))
-
+                list(executor.map(lambda i: download(i, progress_bar), infos))
 
     def load(strip_filepath):
 
@@ -187,14 +186,12 @@ def get_strips() -> gpd.GeoDataFrame:
         out["dem"] = os.path.join(os.path.dirname(self_link["href"]), data["assets"]["dem"]["href"][2:])
         out["matchtag"] = os.path.join(os.path.dirname(self_link["href"]), data["assets"]["matchtag"]["href"][2:])
 
-
         return out
 
-       
     strips = gpd.GeoDataFrame.from_records([load(fp) for fp in filepaths])
     strips["geometry"] = strips["geometry"].apply(shapely.geometry.shape)
     strips.crs = CRS.from_epsg(4326)
-    strips["geometry"] = gpd.GeoSeries.from_wkb(strips["geometry"].to_wkb(output_dimension=2)) 
+    strips["geometry"] = gpd.GeoSeries.from_wkb(strips["geometry"].to_wkb(output_dimension=2))
     strips = strips.to_crs(crs)
 
     for col in ["pgc:image_ids", "pgc:avg_sun_elevs", "instruments"]:
@@ -207,7 +204,7 @@ def get_strips() -> gpd.GeoDataFrame:
 def download_arcticdem(dem_data: pd.Series):
     data_dir = get_data_dir()
     ad_dir = data_dir.joinpath("ArcticDEM")
-    
+
     filepaths = []
     for kind in ["dem", "matchtag"]:
         filepath = ad_dir.joinpath(os.path.basename(dem_data[kind]))
@@ -216,20 +213,17 @@ def download_arcticdem(dem_data: pd.Series):
                 if request.status_code != 200:
                     raise ValueError(f"{request.status_code=} {request.content=}")
 
-                
                 with tempfile.TemporaryDirectory() as temp_dir:
-                    
+
                     temp_path = Path(temp_dir).joinpath("temp.tif")
                     with open(temp_path, "wb") as outfile:
                         shutil.copyfileobj(request.raw, outfile)
 
-                    shutil.move(temp_path,filepath) 
+                    shutil.move(temp_path, filepath)
 
         filepaths.append(filepath)
 
     return filepaths[0], filepaths[1]
-
-    
 
 
 def get_xdem_dem_co() -> dict[str, str]:
@@ -245,6 +239,30 @@ def get_dem_co() -> list[str]:
 def get_res() -> tuple[float, float]:
     """Get the horizontal/vertical resolution of the output DEMs."""
     return (5.0, 5.0)
+
+
+def align_bounds(
+    bounds: rio.coords.BoundingBox | dict[str, float],
+    res: tuple[float, float] | None = None,
+    half_mod: bool = True,
+    buffer: float | None = None,
+) -> rio.coords.BoundingBox:
+    if isinstance(bounds, rio.coords.BoundingBox):
+        bounds = {key: getattr(bounds, key) for key in ["left", "bottom", "right", "top"]}
+
+    if res is None:
+        res = get_res()
+    # Ensure that the moduli of the bounds are zero
+    for i, bound0 in enumerate([["left", "right"], ["bottom", "top"]]):
+        for j, bound in enumerate(bound0):
+
+            mod = (bounds[bound] - (res[i] / 2 if half_mod else 0)) % res[i]
+
+            bounds[bound] = (
+                bounds[bound] - mod + (res[i] if i > 0 and mod != 0 else 0) + ((buffer or 0) * (1 if i > 0 else -1))
+            )
+
+    return rio.coords.BoundingBox(**bounds)
 
 
 def get_bounds(
@@ -269,20 +287,9 @@ def get_bounds(
         "nordenskiold": {"left": 443002.5, "bottom": 8626007.5, "right": 560242.5, "top": 8703007.5},
     }
 
-    if res is None:
-        res = get_res()
-
     bounds = region_bounds[region]
 
-    # Ensure that the moduli of the bounds are zero
-    for i, bound0 in enumerate([["left", "right"], ["bottom", "top"]]):
-        for j, bound in enumerate(bound0):
-
-            mod = (bounds[bound] - (res[i] / 2 if half_mod else 0)) % res[i]
-
-            bounds[bound] = bounds[bound] - mod + (res[i] if i > 0 and mod != 0 else 0)
-
-    return rio.coords.BoundingBox(**bounds)
+    return align_bounds(bounds, res=res, half_mod=half_mod)
 
 
 def get_transform(res: tuple[float, float] | None = None) -> rio.Affine:
@@ -439,7 +446,7 @@ def create_warped_vrt(
     del vrt
 
 
-def build_npi_mosaic(verbose: bool = False) -> Path:
+def build_npi_mosaic(verbose: bool = False) -> tuple[Path, Path]:
     """
     Build a mosaic of tiles downloaded from the NPI.
 
@@ -456,21 +463,45 @@ def build_npi_mosaic(verbose: bool = False) -> Path:
     temp_dir = get_temp_dir()
 
     output_path = temp_dir.joinpath("npi_mosaic_clip.tif")
+    output_year_path = temp_dir.joinpath("npi_mosaic_clip_years.tif")
 
-    if output_path.is_file():
-        return output_path
+    if output_path.is_file() and output_year_path.is_file():
+        return output_path, output_year_path
 
     from osgeo import gdal
 
     crs = get_crs()
     res = get_res()
     bounds = get_bounds(res=res)
+    shape = get_shape(res=res)
 
     # Generate links to the DEM tiles within their zipfiles
     uris = []
-    for filepath in np_dem_dir.glob("NP_S0*.zip"):
+    year_rasters = []
+    for filepath in tqdm(list(np_dem_dir.glob("NP_S0*.zip")), desc="Building year raster"):
+        year = int(filepath.stem.split("_")[3])
         uri = f"/vsizip/{filepath}/{filepath.stem}/{filepath.stem.replace('NP_', '')}.tif"
+
+        dem = xdem.DEM(uri)
+        year_raster = gu.Raster.from_array(
+            (np.zeros(dem.shape, dtype="uint16") + year) * (1 - dem.data.mask.astype("uint16")),
+            transform=dem.transform,
+            crs=dem.crs,
+            nodata=0,
+        )
+
+        # year = (dem - dem).astype("uint16") + 2009
+        # year_raster.show()
+        # plt.show()
+        year_rasters.append(year_raster)
         uris.append(uri)
+
+    year_raster = gu.spatial_tools.merge_rasters(year_rasters, merge_algorithm=np.nansum, resampling_method="nearest")
+
+    year_raster.reproject(dst_bounds=bounds, dst_res=res, dst_crs=crs, resampling="nearest").save(
+        output_year_path, tiled=True, compress="lzw"
+    )
+    del year_raster
 
     vrt_dir = temp_dir.joinpath("npi_vrts/")
     vrt_dir.mkdir(exist_ok=True)
@@ -491,6 +522,7 @@ def build_npi_mosaic(verbose: bool = False) -> Path:
         outputBounds=list(bounds),
         multithread=True,
     )
+    return output_path, output_year_path
 
 
 def prepare_mask(filepath: Path) -> np.ndarray:
@@ -510,6 +542,9 @@ def prepare_mask(filepath: Path) -> np.ndarray:
 
     """
     outlier_mask = gu.Raster(str(filepath)).data.filled(0) == 0
+
+    if np.count_nonzero(~outlier_mask) == 0:
+        raise ValueError("Mask is empty")
 
     # Dilate the mask (expand the excluded areas)
     struct = scipy.ndimage.iterate_structure(scipy.ndimage.generate_binary_structure(2, 1), 3)
@@ -544,7 +579,7 @@ def prepare_arcticdem(dem_path: Path) -> tuple[Path, Path]:
     temp_dir = get_temp_dir()
     crs = get_crs()
     res = get_res()
-    bounds = get_bounds(res=res)
+    full_bounds = get_bounds(res=res)
 
     ad_vrt_dir = temp_dir.joinpath("arcticdem_vrts")
     ad_vrt_dir.mkdir(exist_ok=True)
@@ -557,6 +592,16 @@ def prepare_arcticdem(dem_path: Path) -> tuple[Path, Path]:
         # First create a warped VRT to convert the CRS
         warp_vrt_path = ad_vrt_dir.joinpath(filepath.stem + f"_epsg{crs.to_epsg()}.vrt")
         create_warped_vrt(str(filepath), str(warp_vrt_path), out_crs=crs)
+
+        with rio.open(warp_vrt_path) as warp_raster:
+            warp_bounds = align_bounds(warp_raster.bounds, res=res, buffer=10 * res[0])
+
+        bounds = rio.coords.BoundingBox(
+            left=max(full_bounds.left, warp_bounds.left),
+            bottom=max(full_bounds.bottom, warp_bounds.bottom),
+            right=min(full_bounds.right, warp_bounds.right),
+            top=min(full_bounds.top, full_bounds.top),
+        )
 
         # Then, build a new VRT to resample and crop the raster
         out_path = warp_vrt_path.with_stem(warp_vrt_path.stem + f"_{res[0]}m")
@@ -624,24 +669,33 @@ def coregister(dem_path: Path, verbose: bool = True):
     if verbose:
         print(f"{now_time()}: Loaded and modified mask")
 
-    stable_terrain_path = build_stable_terrain_mask(verbose=verbose)
-    stable_terrain_mask = gu.Raster(str(stable_terrain_path)).data.filled(0) == 1
-    if verbose:
-        print(f"{now_time()}: Loaded stable terrain mask")
-
     tba_dem = gu.Raster(str(dem_vrt_path))
     tba_dem.set_mask(mask)
+
+    if np.count_nonzero(np.isfinite(tba_dem.data.filled(np.nan))) == 0:
+        raise ValueError("No finite values in TBA DEM")
     if verbose:
         print(f"{now_time()}: Loaded TBA DEM")
 
+    stable_terrain_path = build_stable_terrain_mask(verbose=verbose)
+    stable_terrain_mask = gu.Raster(str(stable_terrain_path), load_data=False).crop(tba_dem, inplace=False)
+    stable_terrain_mask = stable_terrain_mask.data.filled(0) == 1
+
+    if np.count_nonzero(stable_terrain_mask) == 0:
+        raise ValueError("No stable terrain pixels in window")
+    if verbose:
+        print(f"{now_time()}: Loaded stable terrain mask")
+
     del mask
 
-    npi_mosaic_path = build_npi_mosaic(verbose=verbose)
-    ref_dem = gu.Raster(str(npi_mosaic_path))
-
+    npi_mosaic_path, _ = build_npi_mosaic(verbose=verbose)
+    ref_dem = gu.Raster(str(npi_mosaic_path), load_data=False).crop(tba_dem, inplace=False)
     if verbose:
         print(f"{now_time()}: Loaded ref. DEM. Running co-registration")
+    if np.count_nonzero(np.isfinite(ref_dem.data.filled(np.nan))) == 0:
+        raise ValueError("No finite values in reference DEM")
 
+    # if np.count_nonzero(stable_terrain_mask) == 0 or np.count_nonzero(np.isfinite(ref_dem.data.filled(np.nan))) == 0
     coreg = xdem.coreg.ICP() + xdem.coreg.NuthKaab()
     coreg.fit(
         reference_dem=ref_dem.data,
@@ -681,22 +735,42 @@ def coregister(dem_path: Path, verbose: bool = True):
 
 def generate_difference(dem_path: Path, verbose: bool = False):
 
+    date = pd.to_datetime(dem_path.stem.split("_")[3], format="%Y%m%d")
     temp_dir = get_temp_dir()
-    dh_dir = temp_dir.joinpath("dh")
+    dh_dir = temp_dir.joinpath(f"dh/{date.year}")
+    dhdt_dir = temp_dir.joinpath(f"dhdt/{date.year}")
+    dt_dir = temp_dir.joinpath(f"dt/{date.year}")
 
-    output_path = dh_dir.joinpath(dem_path.stem + "_dh.tif")
-    if output_path.is_file():
-        return output_path
+    output_dh_path = dh_dir.joinpath(dem_path.stem + "_dh.tif")
+    output_dhdt_path = dhdt_dir.joinpath(dem_path.stem + "_dhdt.tif")
+    output_dt_path = dt_dir.joinpath(dem_path.stem + "_dt.tif")
+    if all(fp.is_file() for fp in [output_dh_path, output_dhdt_path, output_dt_path]):
+        return output_dh_path, output_dhdt_path
 
-    dh_dir.mkdir(exist_ok=True, parents=True)
-
-    npi_mosaic_path = build_npi_mosaic(verbose=verbose)
-    npi_dem = xdem.DEM(str(npi_mosaic_path))
+    for directory in [dh_dir, dt_dir, dhdt_dir]:
+        directory.mkdir(exist_ok=True, parents=True)
 
     dem = xdem.DEM(str(dem_path), read_from_fn=False)
-    (dem - npi_dem).save(output_path, co_opts=get_xdem_dem_co())
 
-    return output_path
+    npi_mosaic_path, npi_mosaic_years_path = build_npi_mosaic(verbose=verbose)
+    npi_dem = xdem.DEM(str(npi_mosaic_path), load_data=False).crop(dem, inplace=False)
+    npi_dem_years = xdem.DEM(str(npi_mosaic_years_path), load_data=False).crop(dem, inplace=False).astype("float32")
+    # Assume that it's the 1st of August of every year
+    npi_dem_years += 8 / 12
+
+    date = pd.to_datetime(dem_path.stem.split("_")[3], format="%Y%m%d")
+    year_decimal = date.year + date.month / 12 + date.day / (30 * 12)
+
+    dh_map = dem - npi_dem
+
+    dt_map = year_decimal - npi_dem_years
+    dt_map.data.mask = dh_map.data.mask
+    dhdt_map = dh_map / dt_map
+    dt_map.save(output_dt_path, co_opts=get_xdem_dem_co())
+    dhdt_map.save(output_dhdt_path, co_opts=get_xdem_dem_co())
+    dh_map.save(output_dh_path, co_opts=get_xdem_dem_co(), nodata=-9999)
+
+    return output_dh_path, output_dhdt_path
 
 
 def median_stack():
@@ -704,7 +778,7 @@ def median_stack():
     temp_dir = get_temp_dir()
     dh_dir = temp_dir.joinpath("dh")
 
-    bounds = rio.coords.BoundingBox(535177.5, 8666322.5,547662.5, 8678382.5)
+    bounds = rio.coords.BoundingBox(535177.5, 8666322.5, 547662.5, 8678382.5)
 
     start_date = pd.Timestamp("2009-07-25")
 
@@ -716,7 +790,7 @@ def median_stack():
 
         date = pd.to_datetime(filepath.stem.split("_")[3], format="%Y%m%d")
 
-        #if date.year < 2020:
+        # if date.year < 2020:
         #    continue
 
         year_diff = (date - start_date).total_seconds() / (3600 * 24 * 365.24)
@@ -726,7 +800,14 @@ def median_stack():
             output_data["transform"] = rio.windows.transform(window, raster.transform)
             output_data["crs"] = raster.crs
 
-            dhs.append(np.clip(raster.read(1, window=window, masked=True).filled(np.nan) / year_diff, -4, 4))
+            dhs.append(
+                np.clip(
+                    raster.read(1, window=window, masked=True, boundless=True, fill_value=-9999).filled(np.nan)
+                    / year_diff,
+                    -4,
+                    4,
+                )
+            )
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", category=RuntimeWarning)
@@ -734,18 +815,42 @@ def median_stack():
 
     plt.imshow(median, cmap="coolwarm_r", vmin=-3, vmax=3)
 
-    with rio.open(temp_dir.joinpath("median.tif"), "w", driver="GTiff", width=median.shape[1], height=median.shape[0], count=1, crs=output_data["crs"], transform=output_data["transform"], dtype=median.dtype, nodata=-9999, compress="deflate", tiled=True) as raster:
+    with rio.open(
+        temp_dir.joinpath("median.tif"),
+        "w",
+        driver="GTiff",
+        width=median.shape[1],
+        height=median.shape[0],
+        count=1,
+        crs=output_data["crs"],
+        transform=output_data["transform"],
+        dtype=median.dtype,
+        nodata=-9999,
+        compress="deflate",
+        tiled=True,
+    ) as raster:
         raster.write(np.where(np.isfinite(median), median, -9999), 1)
     plt.show()
 
-            
-def big_median_stack(year=2021, n_threads: int | None = None, verbose: bool = True):
+
+def big_median_stack(years: int | list[int] | None = 2021, n_threads: int | None = None, verbose: bool = True):
 
     temp_dir = get_temp_dir()
-    dh_dir = temp_dir.joinpath("dh")
-    output_path = dh_dir.joinpath(f"median_dhdt_{year}.tif")
+    dhdt_dir = temp_dir.joinpath("dhdt")
 
-    start_date = pd.Timestamp("2009-07-25")
+    if years is None:
+        ext = ""
+        dirs = [d for d in dhdt_dir.glob("*") if d.is_dir()]
+    if isinstance(years, int):
+        ext = "_" + str(years)
+        dirs = [dhdt_dir.joinpath(str(years))]
+    elif isinstance(years, list):
+        ext = "_" + "-".join(map(str, years))
+        dirs = [dhdt_dir.joinpath(str(year)) for year in years]
+    else:
+        raise TypeError(f"{years=} has unknown type: {type(years)=}")
+
+    output_path = dhdt_dir.joinpath(f"median_dhdt{ext}.tif")
 
     res = get_res()
     shape = get_shape(res=res)
@@ -754,13 +859,15 @@ def big_median_stack(year=2021, n_threads: int | None = None, verbose: bool = Tr
     crs = get_crs()
 
     block_size = [512] * 2
-    start_date = pd.Timestamp("2009-07-25")
     v_clip = 150 / (2021 - 2009)
 
     strips = get_strips()
 
-    dh_files = list(dh_dir.glob(f"*{year}*_dh.tif"))
-    titles = {dh_path.stem[:dh_path.stem.index("_seg") + 5]: dh_path for dh_path in dh_files}
+    dhdt_files = []
+    for directory in dirs:
+        dhdt_files += list(directory.glob("*_dhdt.tif"))
+
+    titles = {dh_path.stem[: dh_path.stem.index("_seg") + 5]: dh_path for dh_path in dhdt_files}
 
     locks = {path: threading.Lock() for path in titles.values()}
 
@@ -790,25 +897,30 @@ def big_median_stack(year=2021, n_threads: int | None = None, verbose: bool = Tr
 
             window_infos.append({"window": window, "paths": paths})
 
-    # Shuffle it to reduce the chance that multiple threads wait to read the same file
+    # Shuffle the windows to reduce the chance that multiple threads wait to read the same file
     random.shuffle(window_infos)
 
-    def process(window_info: list[dict[str, rio.windows.Window | tuple[Path, threading.Lock]]], progress_bar: tqdm | None = None) -> None:
+    def process(
+        window_info: list[dict[str, rio.windows.Window | tuple[Path, threading.Lock]]], progress_bar: tqdm | None = None
+    ) -> None:
 
         window: rio.windows.Window = window_info["window"]
+        window_bounds = rio.windows.bounds(window, transform)
 
         data = []
 
         for path, lock in window_info["paths"]:
-            date = pd.to_datetime(path.stem.split("_")[3], format="%Y%m%d")
-
-
-            year_diff = (date - start_date).total_seconds() / (3600 * 24 * 365.24)
-
             with lock:
                 with rio.open(path) as raster:
+                    raster_win = rio.windows.from_bounds(*window_bounds, raster.transform)
 
-                    data.append(np.clip(raster.read(1, window=window, masked=True).filled(np.nan) / year_diff, -v_clip, v_clip))
+                    data.append(
+                        np.clip(
+                            raster.read(1, window=raster_win, masked=True, boundless=True).filled(np.nan),
+                            -v_clip,
+                            v_clip,
+                        )
+                    )
 
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", "All-NaN slice")
@@ -819,17 +931,17 @@ def big_median_stack(year=2021, n_threads: int | None = None, verbose: bool = Tr
             progress_bar.update()
             return median
 
-        #median[~np.isfinite(median)] = -9999
+        # median[~np.isfinite(median)] = -9999
 
         with write_lock:
-            #print(window.row_off, window.row_off + window.height, window.col_off,window.col_off + window.width)
-            stack[window.row_off:window.row_off + window.height, window.col_off:window.col_off + window.width] = median
+            # print(window.row_off, window.row_off + window.height, window.col_off,window.col_off + window.width)
+            stack[
+                window.row_off : window.row_off + window.height, window.col_off : window.col_off + window.width
+            ] = median
 
         progress_bar.update()
         return median
-            
-        
-            
+
     with tqdm(total=len(window_infos), desc="Calculating median blocks", smoothing=0.1) as progress_bar:
         if n_threads == 1:
             for window_info in window_infos:
@@ -840,57 +952,80 @@ def big_median_stack(year=2021, n_threads: int | None = None, verbose: bool = Tr
                     warnings.filterwarnings("ignore", "All-NaN slice")
                     list(executor.map(lambda wi: process(wi, progress_bar=progress_bar), window_infos))
 
-
     if verbose:
         print(f"Writing {output_path.name}")
-    with rio.open(output_path, "w", "GTiff", width=shape[1], height=shape[0], count=1, crs=crs, transform=transform, dtype=stack.dtype, nodata=-9999, compress="deflate", tiled=True, zlevel=12) as raster:
+    with rio.open(
+        output_path,
+        "w",
+        "GTiff",
+        width=shape[1],
+        height=shape[0],
+        count=1,
+        crs=crs,
+        transform=transform,
+        dtype=stack.dtype,
+        nodata=-9999,
+        compress="deflate",
+        tiled=True,
+        zlevel=12,
+    ) as raster:
         raster.write(np.where(np.isfinite(stack), stack, -9999), 1)
-        
-    #windows = np.ravel([[rio.windows.Window(col_off, row_off, min(shape[1] - col_off, block_size[0]), min(shape[0] - row_off, block_size[1])) for col_off in np.arange(0, shape[1], step=block_size[0])] for row_off in np.arange(0, shape[0], step=block_size[1])])
-        
 
-def process_all():
-    
+    # windows = np.ravel([[rio.windows.Window(col_off, row_off, min(shape[1] - col_off, block_size[0]), min(shape[0] - row_off, block_size[1])) for col_off in np.arange(0, shape[1], step=block_size[0])] for row_off in np.arange(0, shape[0], step=block_size[1])])
+
+
+def process_all(show_progress_bar: bool = True):
+
     strips = get_strips()
 
     # Drønbreen
-    #poi = shapely.geometry.box(538286, 8669555,544315,8675416)
+    # poi = shapely.geometry.box(538286, 8669555,544315,8675416)
     # All of Nordenskiöld Land
     poi = shapely.geometry.box(*get_bounds())
 
     # Remove the northern part of Isfjorden
-    poi = poi.difference(shapely.geometry.box(435428,8679301,497701,8714978))
+    poi = poi.difference(shapely.geometry.box(435428, 8679301, 497701, 8714978))
 
     failures_file = Path("failures.csv")
 
-    strips = strips[strips.intersects(poi)].sort_values("start_datetime", ascending=True)
+    strips = strips[strips.intersects(poi)].sort_values("start_datetime", ascending=False)
     if failures_file.is_file():
         failures = pd.read_csv(failures_file, names=["title", "exception"])
         strips = strips[~strips["title"].isin(failures["title"])]
 
-    with tqdm(total=strips.shape[0]) as progress_bar:
+    with tqdm(total=strips.shape[0], disable=(not show_progress_bar)) as progress_bar:
         for _, dem_data in strips.iterrows():
 
-            if dem_data["title"] == "SETSM_s2s041_W1W2_20210828_10200100B678AF00_10300100C56FE600_2m_lsf_seg3":
-                continue
-            progress_bar.set_description(f"Processing {dem_data['title']}")
+            progress_bar.set_description(f"Working on {dem_data['title']}")
             dem_path, _ = download_arcticdem(dem_data)
             try:
-                dem_coreg = coregister(dem_path=dem_path, verbose=False)
+                dem_coreg = coregister(dem_path=dem_path, verbose=(not show_progress_bar))
             except Exception as exception:
-                with open("failures.csv", "a+") as outfile:
-                    outfile.write(dem_data['title'] + ',"' + str(exception).replace('\n', ' ') + '"\n')
-            generate_difference(dem_coreg, verbose=False)
-            progress_bar.update()
+                exception_str = str(exception)
 
-    
-    
+                if not any(
+                    s in exception_str
+                    for s in [
+                        "Transformed DEM has all nans",
+                        "ICP coregistration failed",
+                        "Not enough valid points",
+                        "Mask is empty",
+                        "No finite values in",
+                        "No stable terrain pixels in window",
+                    ]
+                ):
+
+                    raise exception
+                with open("failures.csv", "a+") as outfile:
+                    outfile.write(dem_data["title"] + ',"' + str(exception).replace("\n", " ") + '"\n')
+            generate_difference(dem_coreg, verbose=(not show_progress_bar))
+            progress_bar.update()
 
 
 def main():
     process_all()
 
-    #median_stack()
+    # median_stack()
 
 
 if __name__ == "__main__":
