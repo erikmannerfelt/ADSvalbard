@@ -24,6 +24,7 @@ import warnings
 import tempfile
 import threading
 import random
+import time
 
 
 class NumpyArrayEncoder(json.JSONEncoder):
@@ -473,7 +474,6 @@ def build_npi_mosaic(verbose: bool = False) -> tuple[Path, Path]:
     crs = get_crs()
     res = get_res()
     bounds = get_bounds(res=res)
-    shape = get_shape(res=res)
 
     # Generate links to the DEM tiles within their zipfiles
     uris = []
@@ -490,13 +490,10 @@ def build_npi_mosaic(verbose: bool = False) -> tuple[Path, Path]:
             nodata=0,
         )
 
-        # year = (dem - dem).astype("uint16") + 2009
-        # year_raster.show()
-        # plt.show()
         year_rasters.append(year_raster)
         uris.append(uri)
 
-    year_raster = gu.spatial_tools.merge_rasters(year_rasters, merge_algorithm=np.nansum, resampling_method="nearest")
+    year_raster = gu.spatial_tools.merge_rasters(year_rasters, merge_algorithm=np.nanmax, resampling_method="nearest")
 
     year_raster.reproject(dst_bounds=bounds, dst_res=res, dst_crs=crs, resampling="nearest").save(
         output_year_path, tiled=True, compress="lzw"
@@ -615,17 +612,6 @@ def prepare_arcticdem(dem_path: Path) -> tuple[Path, Path]:
         )
         vrts.append(out_path)
 
-        # gdal.Warp(
-        #     str(out_path),
-        #     str(filepath),
-        #     xRes=5,
-        #     yRes=5,
-        #     dstSRS=crs.to_wkt(),
-        #     outputBounds=list(bounds_5m()),
-        #     resampleAlg=rasterio.warp.Resampling.min if filepath == mask_path else rasterio.warp.Resampling.bilinear,
-        #     creationOptions=CREATION_OPTIONS,
-        #     multithread=True,
-        # )
     return vrts[0], vrts[1]
 
 
@@ -845,7 +831,7 @@ def big_median_stack(years: int | list[int] | None = 2021, n_threads: int | None
         ext = "_" + str(years)
         dirs = [dhdt_dir.joinpath(str(years))]
     elif isinstance(years, list):
-        ext = "_" + "-".join(map(str, years))
+        ext = "_" + "_".join(map(str, years))
         dirs = [dhdt_dir.joinpath(str(year)) for year in years]
     else:
         raise TypeError(f"{years=} has unknown type: {type(years)=}")
@@ -996,6 +982,7 @@ def process_all(show_progress_bar: bool = True):
     with tqdm(total=strips.shape[0], disable=(not show_progress_bar)) as progress_bar:
         for _, dem_data in strips.iterrows():
 
+            start_time = time.time()
             progress_bar.set_description(f"Working on {dem_data['title']}")
             dem_path, _ = download_arcticdem(dem_data)
             try:
@@ -1016,10 +1003,16 @@ def process_all(show_progress_bar: bool = True):
                 ):
 
                     raise exception
-                with open("failures.csv", "a+") as outfile:
+                with open(failures_file, "a+") as outfile:
                     outfile.write(dem_data["title"] + ',"' + str(exception).replace("\n", " ") + '"\n')
             generate_difference(dem_coreg, verbose=(not show_progress_bar))
-            progress_bar.update()
+
+            # If it was really fast, all files already existed and were only validated
+            if (time.time() - start_time) < 3:
+                progress_bar.total = progress_bar.total - 1
+                progress_bar.refresh()
+            else:
+                progress_bar.update()
 
 
 def main():
