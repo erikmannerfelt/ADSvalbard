@@ -25,7 +25,13 @@ import tempfile
 import threading
 import random
 import time
+import xarray as xr
 
+
+REGIONS = {
+    "dronbreen": [536837.5, 8667472.5, 544677.5,8679002.5],
+    "tinkarp": [548762.5,8655937.5,553272.5,8659162.5],
+}
 
 class NumpyArrayEncoder(json.JSONEncoder):
     """A JSON encoder that properly serializes numpy arrays."""
@@ -53,6 +59,7 @@ def get_data_urls():
             for url in [
                 "NP_S0_DTM5_2008_13652_33.zip",
                 "NP_S0_DTM5_2009_13824_33.zip",
+                "NP_S0_DTM5_2009_13822_33.zip",
                 "NP_S0_DTM5_2009_13835_33.zip",
                 "NP_S0_DTM5_2010_13923_33.zip",
                 "NP_S0_DTM5_2010_13836_33.zip",
@@ -200,6 +207,19 @@ def get_strips() -> gpd.GeoDataFrame:
 
     strips.to_feather(output_path)
     return strips
+
+
+def download_file(url: str, output_path: Path):
+
+    with requests.get(url, stream=True) as request, tempfile.TemporaryDirectory() as temp_dir:
+        temp_file = Path(temp_dir).joinpath("file")
+        if request.status_code != 200:
+            raise ValueError(f"{request.status_code=} {request.content=}")
+
+        with open(temp_file, "wb") as outfile:
+            shutil.copyfileobj(request.raw, outfile)
+
+        shutil.move(temp_file, output_path)
 
 
 def download_arcticdem(dem_data: pd.Series):
@@ -459,8 +479,8 @@ def build_npi_mosaic(verbose: bool = False) -> tuple[Path, Path]:
     -------
     A path to the NPI mosaic.
     """
+
     data_dir = get_data_dir()
-    np_dem_dir = data_dir.joinpath("NP_DEMs")
     temp_dir = get_temp_dir()
 
     output_path = temp_dir.joinpath("npi_mosaic_clip.tif")
@@ -478,8 +498,13 @@ def build_npi_mosaic(verbose: bool = False) -> tuple[Path, Path]:
     # Generate links to the DEM tiles within their zipfiles
     uris = []
     year_rasters = []
-    for filepath in tqdm(list(np_dem_dir.glob("NP_S0*.zip")), desc="Building year raster"):
+    for url, filepath in tqdm(get_data_urls()["NP_DEMs"], desc="Preparing DEMs and year info", disable=(not verbose)):
         year = int(filepath.stem.split("_")[3])
+
+        if not filepath.is_file():
+            filepath.parent.mkdir(parents=True, exist_ok=True)
+            download_file(url, filepath)
+
         uri = f"/vsizip/{filepath}/{filepath.stem}/{filepath.stem.replace('NP_', '')}.tif"
 
         dem = xdem.DEM(uri)
@@ -493,6 +518,8 @@ def build_npi_mosaic(verbose: bool = False) -> tuple[Path, Path]:
         year_rasters.append(year_raster)
         uris.append(uri)
 
+    if verbose:
+        print("Merging rasters")
     year_raster = gu.spatial_tools.merge_rasters(year_rasters, merge_algorithm=np.nanmax, resampling_method="nearest")
 
     year_raster.reproject(dst_bounds=bounds, dst_res=res, dst_crs=crs, resampling="nearest").save(
@@ -507,6 +534,8 @@ def build_npi_mosaic(verbose: bool = False) -> tuple[Path, Path]:
     # Mosaic the tiles in a VRT
     gdal.BuildVRT(str(mosaic_path), uris)
 
+    if verbose:
+        print("Saving DEM mosaic")
     # Warp the VRT into one TIF
     gdal.Warp(
         str(output_path),
@@ -669,6 +698,8 @@ def coregister(dem_path: Path, verbose: bool = True):
 
     if np.count_nonzero(stable_terrain_mask) == 0:
         raise ValueError("No stable terrain pixels in window")
+    if np.count_nonzero(np.isfinite(tba_dem.data.filled(np.nan)[stable_terrain_mask])) == 0:
+        raise ValueError("No overlapping stable terrain")
     if verbose:
         print(f"{now_time()}: Loaded stable terrain mask")
 
@@ -960,14 +991,79 @@ def big_median_stack(years: int | list[int] | None = 2021, n_threads: int | None
     # windows = np.ravel([[rio.windows.Window(col_off, row_off, min(shape[1] - col_off, block_size[0]), min(shape[0] - row_off, block_size[1])) for col_off in np.arange(0, shape[1], step=block_size[0])] for row_off in np.arange(0, shape[0], step=block_size[1])])
 
 
+def uncertainty():
+    
+    poi_coords= 538280, 8669555,544315,8675410 
+    poi = shapely.geometry.box(*poi_coords)
+    stable_terrain_path = build_stable_terrain_mask()
+
+    median_stack_path = Path("temp/dhdt/median_dhdt_2021.tif")
+    npi_mosaic_path, _ = build_npi_mosaic()
+
+    npi_dem = xdem.DEM(str(npi_mosaic_path), load_data=False).crop(poi_coords, inplace=False)
+    stable_terrain = gu.Raster(str(stable_terrain_path), load_data=False).crop(poi_coords, inplace=False)
+
+    unstable_terrain_mask = stable_terrain.data != 1
+
+    median = gu.Raster(str(median_stack_path), load_data=False).crop(poi_coords, inplace=False)  
+
+    
+    #median.data.mask[stable_terrain.data != 1] = True
+
+    
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", "Setting default nodata")
+        slope, maxc = xdem.terrain.get_terrain_attribute(npi_dem, ["slope", "maximum_curvature"]) 
+
+    
+    errors, df_binning, error_function = xdem.spatialstats.infer_heteroscedasticity_from_stable(
+        dvalues=median, list_var=[slope, maxc], list_var_names=["slope", "maxc"], unstable_mask=unstable_terrain_mask
+    )
+
+    zscores = median / errors
+    emp_variogram, params_variogram_model, spatial_corr_function = xdem.spatialstats.infer_spatial_correlation_from_stable(
+        dvalues=zscores, list_models=["Gaussian", "Spherical"], unstable_mask=unstable_terrain_mask, random_state=42
+    )
+
+    areas = 10 ** np.linspace(1, 12)
+    stderrs = xdem.spatialstats.spatial_error_propagation(
+        areas=areas, errors=errors, params_variogram_model=params_variogram_model
+    )
+
+    plt.plot(areas / 10**6, stderrs)
+    plt.xlabel("Averaging area (km²)")
+    plt.ylabel("Standard error (m/a)")
+    plt.xscale("log")
+
+    plt.savefig("temp/errors.jpg", dpi=300)
+
+    df = xdem.spatialstats.sample_empirical_variogram(
+        values=np.where(unstable_terrain_mask, np.nan, zscores.data.filled(np.nan)), gsd=median.res[0], subsample=100, n_variograms=10, random_state=42
+    )
+    # Standardize by the error so the y-axis makes sense
+    df[["exp", "err_exp"]] *= errors.data.mean()
+    print(df)
+
+    xdem.spatialstats.plot_variogram(df, xscale="log")
+    plt.savefig("temp/variogram.jpg", dpi=300)
+
+    #slope.save("temp/npi_slope.tif")
+    #maxc.save("temp
+
+    
+
+
 def process_all(show_progress_bar: bool = True):
 
     strips = get_strips()
 
-    # Drønbreen
-    # poi = shapely.geometry.box(538286, 8669555,544315,8675416)
     # All of Nordenskiöld Land
     poi = shapely.geometry.box(*get_bounds())
+
+    # Drønbreen
+    #poi = shapely.geometry.box(538286, 8669555,544315,8675416)
+    # Tinkarpbreen
+    #poi = shapely.geometry.box(548766,8655934,553271,8659162)
 
     # Remove the northern part of Isfjorden
     poi = poi.difference(shapely.geometry.box(435428, 8679301, 497701, 8714978))
@@ -988,7 +1084,13 @@ def process_all(show_progress_bar: bool = True):
             try:
                 dem_coreg = coregister(dem_path=dem_path, verbose=(not show_progress_bar))
             except Exception as exception:
+
                 exception_str = str(exception)
+                if exception.__class__.__name__ == "AssertionError" and len(exception_str) == 0:
+                    with open(failures_file, "a+") as outfile:
+                        outfile.write(dem_data["title"] + ',"Empty AssertionError; probably xdem"\n')
+                    progress_bar.update()
+                    continue
 
                 if not any(
                     s in exception_str
@@ -999,12 +1101,15 @@ def process_all(show_progress_bar: bool = True):
                         "Mask is empty",
                         "No finite values in",
                         "No stable terrain pixels in window",
+                        "Expected one value, found 0"
                     ]
                 ):
 
                     raise exception
                 with open(failures_file, "a+") as outfile:
                     outfile.write(dem_data["title"] + ',"' + str(exception).replace("\n", " ") + '"\n')
+                progress_bar.update()
+                continue
             generate_difference(dem_coreg, verbose=(not show_progress_bar))
 
             # If it was really fast, all files already existed and were only validated
@@ -1015,8 +1120,115 @@ def process_all(show_progress_bar: bool = True):
                 progress_bar.update()
 
 
+def glacier_stack(glacier="tinkarp"):
+
+    
+    poi = shapely.geometry.box(*REGIONS[glacier])
+
+    res = (5, 5)
+    width = int((poi.bounds[2] - poi.bounds[0]) / res[0])
+    height = int((poi.bounds[3] - poi.bounds[1]) / res[1]) 
+    transform = rio.transform.from_bounds(*poi.bounds, width, height)
+
+    dems_dir = Path("temp/arcticdem_coreg")
+    ref_dem_path, ref_dem_years_path = build_npi_mosaic()
+
+    xr_coords = [
+        ("y", np.linspace(poi.bounds[1] + res[1] / 2, poi.bounds[3] - res[1] / 2, height)[::-1]),
+        ("x", np.linspace(poi.bounds[0] + res[0] / 2, poi.bounds[2] - res[0] / 2, width)),
+    ]
+
+    i = 0
+    arrays = []
+    dem_paths = list(dems_dir.iterdir())
+    arrays = np.empty((len(dem_paths), height, width), dtype="float32") + np.nan
+    times = []
+
+    for filepath in tqdm(list(dems_dir.iterdir()), desc="Sampling rasters"):
+        if filepath.suffix != ".tif":
+            continue
+
+        #if i > 10:
+        #    break
+
+        with rio.open(filepath) as raster:
+            if not poi.intersects(shapely.geometry.box(*raster.bounds)):
+                continue
+
+            window = rio.windows.from_bounds(*poi.bounds, transform=raster.transform)
+            data = raster.read(1, window=window, masked=True, boundless=True).filled(np.nan)
+
+        if np.count_nonzero(np.isfinite(data)) == 0:
+            continue
+
+        date = pd.to_datetime(filepath.stem.split("_")[3])
+
+        year_dec = date.year + (date.month / 12) + (date.day / (30 * 12)) + (i / (365 * 24))
+
+        arrays[i, :, :] = data
+        times.append(year_dec)
+            
+
+        # arrays.append(xr.DataArray(
+        #     data.reshape((1, height, width)),
+        #     coords=[("time", [year_dec])] + xr_coords,
+        #     name="ad_elevation"
+        # ))
+        
+
+        i += 1
+
+        #if np.std(times) > 2:
+        #    break
+
+    stack = xr.Dataset({"ad_elevation": xr.DataArray(arrays[:i, :, :], coords=[("time", times)] + xr_coords)})
+
+    for path, name in [(ref_dem_path, "ref_elevation"), (ref_dem_years_path, "ref_elevation_year")]:
+        with rio.open(path) as raster:
+            window = rio.windows.from_bounds(*poi.bounds, transform=raster.transform)
+
+            data = raster.read(1, window=window, masked=True, boundless=True).astype("float32").filled(np.nan)
+
+            if name == "ref_elevation_year":
+                data += (8 / 12)
+
+            stack[name] = xr.DataArray(data, coords=xr_coords)
+
+    #stack["dt"] = stack["time"].
+    stack["dt"] = stack["time"].broadcast_like(stack["ad_elevation"]) - stack["ref_elevation_year"].broadcast_like(stack["ad_elevation"])
+
+    stack["dh"] = stack["ad_elevation"] - stack["ref_elevation"]
+
+    stack["dhdt"] = stack["dh"] / stack["dt"]
+
+    
+    stack = stack.where(xr.apply_ufunc(np.abs, stack["dhdt"]).mean(["x", "y"]) < 2, drop=True)
+
+
+    #norm = (xr.apply_ufunc(np.abs, stack["dhdt"]).median("time")).clip(max=0.1)
+
+    #mask = xr.where((xr.apply_ufunc(np.abs,stack["dhdt"]) / norm) < 70, 0, np.nan)
+    mask = xr.where(xr.apply_ufunc(np.abs, stack["dhdt"]) < 5, 0, np.nan) 
+
+
+    stack["dhdt"] = stack["dhdt"] + mask
+
+    yearly = stack["dhdt"].groupby(stack["time"].astype(int)).median()
+
+    for year in yearly["time"].values:
+        #if year == 2012:
+        #    continue
+        year_data = yearly.sel(time=year)
+
+        Path(glacier).mkdir(exist_ok=True)
+
+        year_data.clip(-3, 3).plot(cmap="RdBu", vmin=-3, vmax=3, aspect="equal", size=5)
+        plt.savefig(f"{glacier}/{glacier}_{year}.jpg", dpi=600)
+        #plt.show()
+
 def main():
     process_all()
+    #glacier_stack()
 
     # median_stack()
 
