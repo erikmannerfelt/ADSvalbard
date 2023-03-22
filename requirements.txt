@@ -12,3 +12,4 @@ zarr
 mypy
 requests
 cdsapi
+bottleneck

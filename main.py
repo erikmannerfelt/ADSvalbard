@@ -26,12 +26,18 @@ import threading
 import random
 import time
 import xarray as xr
+import scipy.optimize
+import sklearn.preprocessing
+import sklearn.linear_model
+import sklearn.pipeline
+from tqdm.dask import TqdmCallback
 
 
 REGIONS = {
-    "dronbreen": [536837.5, 8667472.5, 544677.5,8679002.5],
-    "tinkarp": [548762.5,8655937.5,553272.5,8659162.5],
+    "dronbreen": [536837.5, 8667472.5, 544677.5, 8679002.5],
+    "tinkarp": [548762.5, 8655937.5, 553272.5, 8659162.5],
 }
+
 
 class NumpyArrayEncoder(json.JSONEncoder):
     """A JSON encoder that properly serializes numpy arrays."""
@@ -992,8 +998,8 @@ def big_median_stack(years: int | list[int] | None = 2021, n_threads: int | None
 
 
 def uncertainty():
-    
-    poi_coords= 538280, 8669555,544315,8675410 
+
+    poi_coords = 538280, 8669555, 544315, 8675410
     poi = shapely.geometry.box(*poi_coords)
     stable_terrain_path = build_stable_terrain_mask()
 
@@ -1005,23 +1011,24 @@ def uncertainty():
 
     unstable_terrain_mask = stable_terrain.data != 1
 
-    median = gu.Raster(str(median_stack_path), load_data=False).crop(poi_coords, inplace=False)  
+    median = gu.Raster(str(median_stack_path), load_data=False).crop(poi_coords, inplace=False)
 
-    
-    #median.data.mask[stable_terrain.data != 1] = True
+    # median.data.mask[stable_terrain.data != 1] = True
 
-    
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", "Setting default nodata")
-        slope, maxc = xdem.terrain.get_terrain_attribute(npi_dem, ["slope", "maximum_curvature"]) 
+        slope, maxc = xdem.terrain.get_terrain_attribute(npi_dem, ["slope", "maximum_curvature"])
 
-    
     errors, df_binning, error_function = xdem.spatialstats.infer_heteroscedasticity_from_stable(
         dvalues=median, list_var=[slope, maxc], list_var_names=["slope", "maxc"], unstable_mask=unstable_terrain_mask
     )
 
     zscores = median / errors
-    emp_variogram, params_variogram_model, spatial_corr_function = xdem.spatialstats.infer_spatial_correlation_from_stable(
+    (
+        emp_variogram,
+        params_variogram_model,
+        spatial_corr_function,
+    ) = xdem.spatialstats.infer_spatial_correlation_from_stable(
         dvalues=zscores, list_models=["Gaussian", "Spherical"], unstable_mask=unstable_terrain_mask, random_state=42
     )
 
@@ -1038,7 +1045,11 @@ def uncertainty():
     plt.savefig("temp/errors.jpg", dpi=300)
 
     df = xdem.spatialstats.sample_empirical_variogram(
-        values=np.where(unstable_terrain_mask, np.nan, zscores.data.filled(np.nan)), gsd=median.res[0], subsample=100, n_variograms=10, random_state=42
+        values=np.where(unstable_terrain_mask, np.nan, zscores.data.filled(np.nan)),
+        gsd=median.res[0],
+        subsample=100,
+        n_variograms=10,
+        random_state=42,
     )
     # Standardize by the error so the y-axis makes sense
     df[["exp", "err_exp"]] *= errors.data.mean()
@@ -1047,10 +1058,8 @@ def uncertainty():
     xdem.spatialstats.plot_variogram(df, xscale="log")
     plt.savefig("temp/variogram.jpg", dpi=300)
 
-    #slope.save("temp/npi_slope.tif")
-    #maxc.save("temp
-
-    
+    # slope.save("temp/npi_slope.tif")
+    # maxc.save("temp
 
 
 def process_all(show_progress_bar: bool = True):
@@ -1061,9 +1070,9 @@ def process_all(show_progress_bar: bool = True):
     poi = shapely.geometry.box(*get_bounds())
 
     # Drønbreen
-    #poi = shapely.geometry.box(538286, 8669555,544315,8675416)
+    # poi = shapely.geometry.box(538286, 8669555,544315,8675416)
     # Tinkarpbreen
-    #poi = shapely.geometry.box(548766,8655934,553271,8659162)
+    # poi = shapely.geometry.box(548766,8655934,553271,8659162)
 
     # Remove the northern part of Isfjorden
     poi = poi.difference(shapely.geometry.box(435428, 8679301, 497701, 8714978))
@@ -1101,7 +1110,7 @@ def process_all(show_progress_bar: bool = True):
                         "Mask is empty",
                         "No finite values in",
                         "No stable terrain pixels in window",
-                        "Expected one value, found 0"
+                        "Expected one value, found 0",
                     ]
                 ):
 
@@ -1120,68 +1129,234 @@ def process_all(show_progress_bar: bool = True):
                 progress_bar.update()
 
 
-def glacier_stack(glacier="tinkarp"):
+def glacier_stack(glacier="tinkarp", force_redo: bool = False):
 
-    
-    poi = shapely.geometry.box(*REGIONS[glacier])
+    nc_path = Path(glacier).joinpath("stack.nc")
 
-    res = (5, 5)
-    width = int((poi.bounds[2] - poi.bounds[0]) / res[0])
-    height = int((poi.bounds[3] - poi.bounds[1]) / res[1]) 
-    transform = rio.transform.from_bounds(*poi.bounds, width, height)
+    if not nc_path.is_file() or force_redo:
+        poi = shapely.geometry.box(*REGIONS[glacier])
 
-    dems_dir = Path("temp/arcticdem_coreg")
-    ref_dem_path, ref_dem_years_path = build_npi_mosaic()
+        res = (5, 5)
+        width = int((poi.bounds[2] - poi.bounds[0]) / res[0])
+        height = int((poi.bounds[3] - poi.bounds[1]) / res[1])
+        transform = rio.transform.from_bounds(*poi.bounds, width, height)
 
-    xr_coords = [
-        ("y", np.linspace(poi.bounds[1] + res[1] / 2, poi.bounds[3] - res[1] / 2, height)[::-1]),
-        ("x", np.linspace(poi.bounds[0] + res[0] / 2, poi.bounds[2] - res[0] / 2, width)),
-    ]
+        dems_dir = Path("temp/arcticdem_coreg")
+        ref_dem_path, ref_dem_years_path = build_npi_mosaic()
 
-    i = 0
-    arrays = []
-    dem_paths = list(dems_dir.iterdir())
-    arrays = np.empty((len(dem_paths), height, width), dtype="float32") + np.nan
-    times = []
+        xr_coords = [
+            ("y", np.linspace(poi.bounds[1] + res[1] / 2, poi.bounds[3] - res[1] / 2, height)[::-1]),
+            ("x", np.linspace(poi.bounds[0] + res[0] / 2, poi.bounds[2] - res[0] / 2, width)),
+        ]
 
-    for filepath in tqdm(list(dems_dir.iterdir()), desc="Sampling rasters"):
-        if filepath.suffix != ".tif":
-            continue
+        i = 0
+        arrays = []
+        dem_paths = list(dems_dir.iterdir())
+        arrays = np.empty((len(dem_paths), height, width), dtype="float32") + np.nan
+        times = []
 
-        #if i > 10:
-        #    break
-
-        with rio.open(filepath) as raster:
-            if not poi.intersects(shapely.geometry.box(*raster.bounds)):
+        for filepath in tqdm(list(dems_dir.iterdir()), desc="Sampling rasters"):
+            if filepath.suffix != ".tif":
                 continue
 
-            window = rio.windows.from_bounds(*poi.bounds, transform=raster.transform)
-            data = raster.read(1, window=window, masked=True, boundless=True).filled(np.nan)
+            # if i > 10:
+            #    break
 
-        if np.count_nonzero(np.isfinite(data)) == 0:
-            continue
+            with rio.open(filepath) as raster:
+                if not poi.intersects(shapely.geometry.box(*raster.bounds)):
+                    continue
 
-        date = pd.to_datetime(filepath.stem.split("_")[3])
+                window = rio.windows.from_bounds(*poi.bounds, transform=raster.transform)
+                data = raster.read(1, window=window, masked=True, boundless=True).filled(np.nan)
 
-        year_dec = date.year + (date.month / 12) + (date.day / (30 * 12)) + (i / (365 * 24))
+            if np.count_nonzero(np.isfinite(data)) == 0:
+                continue
 
-        arrays[i, :, :] = data
-        times.append(year_dec)
-            
+            date = pd.to_datetime(filepath.stem.split("_")[3])
 
-        # arrays.append(xr.DataArray(
-        #     data.reshape((1, height, width)),
-        #     coords=[("time", [year_dec])] + xr_coords,
-        #     name="ad_elevation"
-        # ))
-        
+            year_dec = date.year + (date.month / 12) + (date.day / (30 * 12)) + (i / (365 * 24))
 
-        i += 1
+            arrays[i, :, :] = data
+            times.append(year_dec)
 
-        #if np.std(times) > 2:
-        #    break
+            # arrays.append(xr.DataArray(
+            #     data.reshape((1, height, width)),
+            #     coords=[("time", [year_dec])] + xr_coords,
+            #     name="ad_elevation"
+            # ))
 
-    stack = xr.Dataset({"ad_elevation": xr.DataArray(arrays[:i, :, :], coords=[("time", times)] + xr_coords)})
+            i += 1
+
+            # if np.std(times) > 2:
+            #    break
+
+        stack = xr.Dataset({"ad_elevation": xr.DataArray(arrays[:i, :, :], coords=[("time", times)] + xr_coords)})
+        stack = stack.sortby("time")
+
+        stack.to_netcdf(
+            nc_path, encoding={key: {"zlib": True, "complevel": 9} for key in stack.data_vars}, engine="h5netcdf"
+        )
+    else:
+        stack = xr.open_dataset(nc_path)
+
+    # stack = stack.isel(x=slice(300, 400), y=slice(300, 400)).dropna("time", how="all")
+
+    width = 500
+    xmin = 551620
+    ymax = 8657890
+    x_slice = slice(xmin, xmin + width)
+    y_slice = slice(ymax, ymax - width)
+    stack = stack.sel(x=x_slice, y=y_slice).dropna("time", how="all")
+
+    # data_mask = ~stack["ad_elevation"].isnull()
+
+    stack["t"] = stack["time"] - 2010
+
+    # stack["dt"] = stack["time"].where(data_mask).ffill("time").diff("time").where(data_mask)
+    # stack["dh"] = stack["ad_elevation"].ffill("time").diff("time").where(data_mask)
+
+    # stack["dhdt"] = stack["dh"] / stack["dt"]
+
+    # stack["dhdt2"] = stack["dh"].ffill("time").diff("time").where(data_mask) / stack["dt"]
+
+    def fit_trend(array: xr.DataArray):
+        xs = array["t"].values
+
+        model = sklearn.pipeline.make_pipeline(
+            sklearn.preprocessing.PolynomialFeatures(degree=2), sklearn.linear_model.RANSACRegressor(min_samples=3, max_trials=5)
+        )
+
+        # estimator = model.steps[-1][1].estimator_
+        def polyfit(y_vals, progress_bar: tqdm | None = None):
+            if progress_bar is not None:
+                progress_bar.update()
+            mask = np.isfinite(y_vals + xs)
+            if np.count_nonzero(mask) < 4:
+                return [np.nan] * 3
+
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", "R^2 score is not well-defined")
+                model.fit(xs[mask].reshape((-1, 1)), y_vals[mask])
+
+            estimator = model.steps[-1][1].estimator_
+            return [estimator.coef_[2], estimator.coef_[1], estimator.intercept_]
+
+        # with tqdm(total=np.multiply(*stack["ad_elevation"].shape[1:]), disable=True) as progress_bar:
+        coefs = np.apply_along_axis(
+            polyfit,
+            axis=1,
+            arr=array["ad_elevation"].values.reshape(array["t"].shape + (-1,)).T,
+        ).reshape(array["ad_elevation"].shape[1:] + (3,))
+        for i, coef in enumerate(["poly_a", "poly_b", "poly_bias"]):
+            array[coef] = xr.DataArray(coefs[:, :, i], coords=[array.y, array.x])
+
+        return array  # xr.Dataset(output)
+
+    chunksize = 20
+
+    for coef in ["poly_a", "poly_b", "poly_bias"]:
+        stack[coef] = xr.DataArray(np.zeros(stack["ad_elevation"].shape[1:]), coords=[stack.y, stack.x])
+    stack = stack.chunk(x=chunksize, y=chunksize)
+
+    # n_chunks = int(np.ceil(stack["x"].shape[0] / chunksize + stack["y"].shape[0] / chunksize))
+
+    stack = stack.map_blocks(fit_trend, template=stack)
+
+    with TqdmCallback():
+        stack = stack.compute()
+
+    point = stack.isel(x=20, y=20).dropna("time", how="any")
+    times = np.linspace(point.t.min(), point.t.max())
+
+    stack["dhdt_est"] = (stack["poly_a"] * 2 * stack["t"] + stack["poly_b"]).transpose("time", "y", "x")
+
+    stack["dhdt_est"].isel(time=-1).plot(vmin=-4, vmax=4, cmap="RdBu")
+    plt.show()
+
+    # plt.scatter(point.time, point["ad_elevation"].values)
+    # plt.plot(times + 2010, np.poly1d([point["poly_a"], point["poly_b"], point["poly_bias"]])(times))
+    # plt.show()
+
+    return
+
+    # return
+
+    with tqdm() as progress_bar:
+        retval = scipy.optimize.least_squares(
+            cost, coefs_guess, kwargs={"data": y_vals, "time": x_vals, "progress_bar": progress_bar}
+        )
+
+    print(retval)
+    return
+
+    # plt.scatter(point.time, point["dhdt"].values)
+    # plt.show()
+    # return
+
+    # plt.scatter(point.time, (point["ad_elevation"] - point["linear_a"] * point["t"]).values)
+    # plt.show()
+
+    # return
+
+    coefs = np.polyfit(point.t.values, point.ad_elevation.values, deg=2)
+
+    times = np.linspace(point.t.min(), point.t.max())
+    plt.scatter(point.time, point["ad_elevation"].values)
+    # plt.plot(times + 2010, np.poly1d([point["poly_a"], point["poly_b"], point["poly_bias"]])(times))
+    plt.plot(times + 2010, np.poly1d(retval.x)(times))
+    # plt.plot(times + 2010, (times * float(point["linear_a"])) + float(point["linear_bias"]))
+    plt.plot(times + 2010, np.poly1d(coefs)(times))
+    plt.show()
+
+    # stack["dh"].isel(time=-1).plot(vmin=-10, vmax=10, cmap="RdBu")
+
+    # stack["dh"].where((stack["dh"].notnull().count() > 10000) & (stack["dt"] > 0.5)).dropna("time", how="all").isel(time=-1).plot(vmin=-5, vmax=5, cmap="RdBu")
+    # print(stack["dh"].mean("time") / stack["dt"].mean("time"))
+
+    # stack["dhdt"] = stack["dh"] / stack["dt"]
+
+    return
+
+    data_indices = np.sort(np.argwhere(~stack["ad_elevation"].isnull().values)[:, ::-1], axis=0)
+
+    print(data_indices[data_indices[:, 0] == 1])
+
+    # times_end = stack["time"].isel(time=data_indices[:, 0])
+    # times_start = stack["time"].isel(time=
+
+    return
+    times = stack["ad_elevation"].isel(time=data_indices[:, 0])
+
+    print(times)
+
+    return
+    dt = times.diff("time")
+
+    print(dt)
+    return
+    xys = stack["xy"].isel(xy=data_indices[:, 1])
+
+    print(times)
+    print(xys)
+    return
+    print(stack["xy"].isel(xy=data_indices[:, 1]))
+
+    stack["dh"] = stack["ad_elevation"].ffill("time").diff("time")
+
+    print(stack["dh"])
+
+    # return
+
+    # def process(array: xr.DataArray) -> xr.DataArray:
+
+    #    return array
+    #    ...
+
+    # print(stack["ad_elevation"].groupby("xy").map(process).unstack("xy"))
+
+    # print(stack["ad_elevation"].isel(xy=data_indices[:, 0], time=data_indices[:, 1]))
+
+    return
 
     for path, name in [(ref_dem_path, "ref_elevation"), (ref_dem_years_path, "ref_elevation_year")]:
         with rio.open(path) as raster:
@@ -1190,33 +1365,32 @@ def glacier_stack(glacier="tinkarp"):
             data = raster.read(1, window=window, masked=True, boundless=True).astype("float32").filled(np.nan)
 
             if name == "ref_elevation_year":
-                data += (8 / 12)
+                data += 8 / 12
 
             stack[name] = xr.DataArray(data, coords=xr_coords)
 
-    #stack["dt"] = stack["time"].
-    stack["dt"] = stack["time"].broadcast_like(stack["ad_elevation"]) - stack["ref_elevation_year"].broadcast_like(stack["ad_elevation"])
+    stack["dt"] = stack["time"].broadcast_like(stack["ad_elevation"]) - stack["ref_elevation_year"].broadcast_like(
+        stack["ad_elevation"]
+    )
 
     stack["dh"] = stack["ad_elevation"] - stack["ref_elevation"]
 
     stack["dhdt"] = stack["dh"] / stack["dt"]
+    # stack["dhdt2"] = stack["dhdt"] / stack["dt"]
 
-    
     stack = stack.where(xr.apply_ufunc(np.abs, stack["dhdt"]).mean(["x", "y"]) < 2, drop=True)
 
+    # norm = (xr.apply_ufunc(np.abs, stack["dhdt"]).median("time")).clip(max=0.1)
 
-    #norm = (xr.apply_ufunc(np.abs, stack["dhdt"]).median("time")).clip(max=0.1)
-
-    #mask = xr.where((xr.apply_ufunc(np.abs,stack["dhdt"]) / norm) < 70, 0, np.nan)
-    mask = xr.where(xr.apply_ufunc(np.abs, stack["dhdt"]) < 5, 0, np.nan) 
-
+    # mask = xr.where((xr.apply_ufunc(np.abs,stack["dhdt"]) / norm) < 70, 0, np.nan)
+    mask = xr.where(xr.apply_ufunc(np.abs, stack["dhdt"]) < 5, 0, np.nan)
 
     stack["dhdt"] = stack["dhdt"] + mask
 
     yearly = stack["dhdt"].groupby(stack["time"].astype(int)).median()
 
     for year in yearly["time"].values:
-        #if year == 2012:
+        # if year == 2012:
         #    continue
         year_data = yearly.sel(time=year)
 
@@ -1224,11 +1398,12 @@ def glacier_stack(glacier="tinkarp"):
 
         year_data.clip(-3, 3).plot(cmap="RdBu", vmin=-3, vmax=3, aspect="equal", size=5)
         plt.savefig(f"{glacier}/{glacier}_{year}.jpg", dpi=600)
-        #plt.show()
+        # plt.show()
+
 
 def main():
     process_all()
-    #glacier_stack()
+    # glacier_stack()
 
     # median_stack()
 
