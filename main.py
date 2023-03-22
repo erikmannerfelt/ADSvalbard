@@ -31,6 +31,7 @@ import sklearn.preprocessing
 import sklearn.linear_model
 import sklearn.pipeline
 from tqdm.dask import TqdmCallback
+import skimage
 
 
 REGIONS = {
@@ -1199,31 +1200,15 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False):
     else:
         stack = xr.open_dataset(nc_path)
 
-    # stack = stack.isel(x=slice(300, 400), y=slice(300, 400)).dropna("time", how="all")
-
-    width = 500
-    xmin = 551620
-    ymax = 8657890
-    x_slice = slice(xmin, xmin + width)
-    y_slice = slice(ymax, ymax - width)
-    stack = stack.sel(x=x_slice, y=y_slice).dropna("time", how="all")
-
-    # data_mask = ~stack["ad_elevation"].isnull()
-
-    stack["t"] = stack["time"] - 2010
-
-    # stack["dt"] = stack["time"].where(data_mask).ffill("time").diff("time").where(data_mask)
-    # stack["dh"] = stack["ad_elevation"].ffill("time").diff("time").where(data_mask)
-
-    # stack["dhdt"] = stack["dh"] / stack["dt"]
-
-    # stack["dhdt2"] = stack["dh"].ffill("time").diff("time").where(data_mask) / stack["dt"]
+    degree = 3
+    names = ["poly_" + ("abcdefghijk"[i] if i != (degree) else "bias") for i in range(degree + 1)]
 
     def fit_trend(array: xr.DataArray):
         xs = array["t"].values
 
         model = sklearn.pipeline.make_pipeline(
-            sklearn.preprocessing.PolynomialFeatures(degree=2), sklearn.linear_model.RANSACRegressor(min_samples=3, max_trials=5)
+            sklearn.preprocessing.PolynomialFeatures(degree=degree),
+            sklearn.linear_model.RANSACRegressor(min_samples=2, max_trials=100),
         )
 
         # estimator = model.steps[-1][1].estimator_
@@ -1239,6 +1224,7 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False):
                 model.fit(xs[mask].reshape((-1, 1)), y_vals[mask])
 
             estimator = model.steps[-1][1].estimator_
+            return np.r_[estimator.coef_[1:][::-1], [estimator.intercept_]]
             return [estimator.coef_[2], estimator.coef_[1], estimator.intercept_]
 
         # with tqdm(total=np.multiply(*stack["ad_elevation"].shape[1:]), disable=True) as progress_bar:
@@ -1246,32 +1232,176 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False):
             polyfit,
             axis=1,
             arr=array["ad_elevation"].values.reshape(array["t"].shape + (-1,)).T,
-        ).reshape(array["ad_elevation"].shape[1:] + (3,))
-        for i, coef in enumerate(["poly_a", "poly_b", "poly_bias"]):
+        ).reshape(array["ad_elevation"].shape[1:] + (degree + 1,))
+
+        for i, coef in enumerate(names):
             array[coef] = xr.DataArray(coefs[:, :, i], coords=[array.y, array.x])
 
         return array  # xr.Dataset(output)
 
-    chunksize = 20
+    poly_path = nc_path.with_stem(nc_path.stem + "_poly")
 
-    for coef in ["poly_a", "poly_b", "poly_bias"]:
-        stack[coef] = xr.DataArray(np.zeros(stack["ad_elevation"].shape[1:]), coords=[stack.y, stack.x])
-    stack = stack.chunk(x=chunksize, y=chunksize)
+    if not poly_path.is_file():
+        width = 1000
+        xmin = 551090
+        ymax = 8658163
 
-    # n_chunks = int(np.ceil(stack["x"].shape[0] / chunksize + stack["y"].shape[0] / chunksize))
+        if False:
+            xmin = 550250.90
+            ymax = 8657357.22
 
-    stack = stack.map_blocks(fit_trend, template=stack)
+        x_slice = slice(xmin, xmin + width)
+        y_slice = slice(ymax, ymax - width)
+        # stack = stack.sel(x=x_slice, y=y_slice).dropna("time", how="all")
 
-    with TqdmCallback():
-        stack = stack.compute()
+        stack["t"] = stack["time"] - int(stack["time"].min()) + 8 / 12
+        chunksize = 20
 
-    point = stack.isel(x=20, y=20).dropna("time", how="any")
-    times = np.linspace(point.t.min(), point.t.max())
+        for coef in names:
+            stack[coef] = xr.DataArray(np.zeros(stack["ad_elevation"].shape[1:]), coords=[stack.y, stack.x])
+        stack = stack.chunk(x=chunksize, y=chunksize)
 
-    stack["dhdt_est"] = (stack["poly_a"] * 2 * stack["t"] + stack["poly_b"]).transpose("time", "y", "x")
+        # n_chunks = int(np.ceil(stackk["x"].shape[0] / chunksize + stack["y"].shape[0] / chunksize))
 
-    stack["dhdt_est"].isel(time=-1).plot(vmin=-4, vmax=4, cmap="RdBu")
+        stack = stack.map_blocks(fit_trend, template=stack)
+        # stack = fit_trend(stack)
+
+        with TqdmCallback(smoothing=0.1, desc="Fitting polynomial"):
+            stack = stack.compute(scheduler="processes")
+
+        stack.to_netcdf(
+            poly_path, encoding={key: {"zlib": True, "complevel": 9} for key in stack.data_vars}, engine="h5netcdf"
+        )
+    else:
+        stack = xr.open_dataset(poly_path)
+
+    # times = np.linspace(point.t.min(), point.t.max())
+
+    # print(stack["poly_bias"].values.shape)
+    # print(np.moveaxis(np.repeat(stack["poly_bias"].values, 11).reshape(stack["poly_bias"].shape + (11,)), 2, 0).shape)
+
+    def estimate(array, times: xr.DataArray | None = None):
+        if times is None:
+            times = array["t"]
+            out_times = array["time"]
+        else:
+            out_times = times
+
+        out = np.moveaxis(
+            np.repeat(array["poly_bias"].values, times.shape[0]).reshape(array["poly_bias"].shape + (times.shape[0],)),
+            2,
+            0,
+        )
+        times_arr = np.repeat(times.values, np.prod(out.shape[1:])).reshape(out.shape)
+        for i, coef in enumerate(names[:-1]):
+            arr = np.moveaxis(
+                np.repeat(array[coef].values, times.shape[0]).reshape(out.shape[1:] + (times.shape[0],)),
+                2,
+                0,
+            )
+            out += arr * times_arr ** (degree - i)
+        return xr.DataArray(out, coords=[out_times, array.y, array.x])
+
+    def derivative(array, times: xr.DataArray | None = None, level: int = 1):
+        if times is None:
+            times = array["t"]
+            out_times = array["time"]
+        else:
+            out_times = times
+
+        #out = np.moveaxis(
+        #    np.repeat(array["poly_bias"].values, times.shape[0]).reshape(array["poly_bias"].shape + (times.shape[0],)),
+        #    2,
+        #    0,
+        #)
+        out = np.zeros((times.shape[0],) + array["poly_bias"].shape )
+        times_arr = np.repeat(times.values, np.prod(out.shape[1:])).reshape(out.shape)
+        for i, coef in enumerate(names[:-level]):
+            arr = np.moveaxis(
+                np.repeat(array[coef].values, times.shape[0]).reshape(out.shape[1:] + (times.shape[0],)),
+                2,
+                0,
+            )
+            new_exponent = degree - i - level
+            factor = np.prod([range(new_exponent + 1, degree - i + 1)])
+            out += factor * arr * (times_arr ** new_exponent if new_exponent != 0 else 1)
+
+            #print(f"{coef}: {factor} * val * x ^ {new_exponent}")
+
+        return xr.DataArray(out, coords=[out_times, array.y, array.x])
+        
+        # return xr.DataArray(est, coords=array["ad_elevation"].coords)
+
+    for coef in names[:-1]:
+        stack[coef].values = skimage.filters.median(stack[coef].values, skimage.morphology.disk(4))
+
+
+    stack["elev_est"] = estimate(stack)
+
+    point = stack.isel(x=0, y=0).dropna("time", how="any")
+    plt.scatter(point["time"], point["elev_est"])
+    plt.scatter(point["time"], point["ad_elevation"])
+    plt.close()
+
+    stack["elev_err"] = xr.apply_ufunc(np.abs, stack["ad_elevation"] - stack["elev_est"]).median("time")
+    plt.subplot(131)
+    stack["elev_err"].plot(vmin=0, vmax=10, cmap="Reds")
+    stack["poly_bias"] += (stack["ad_elevation"] - stack["elev_est"]).median("time")
+
+    stack["elev_est"] = estimate(stack)
+    stack["elev_err"] = xr.apply_ufunc(np.abs, stack["ad_elevation"] - stack["elev_est"]).median("time")
+
+    times = xr.DataArray(np.arange(10))
+    yearly = estimate(stack, times=times).rename({"dim_0": "time"})
+    dhdt = derivative(stack, times=times, level=1).rename({"dim_0": "time"})
+    dhdt2 = derivative(stack, times=times,level=2).rename({"dim_0": "time"}) 
+
+    for arr in [yearly, dhdt, dhdt2]:
+        arr["time"] = arr["time"] + stack["time"].min()
+
+
+    plt.close()
+    plt.figure(figsize=(12, 5))
+    for year in yearly["time"].values:
+        data = yearly.sel(time=year)
+        hill = xdem.terrain.hillshade(data.values, resolution=5)
+        plt.suptitle(f"{year:.0f}")
+        plt.subplot(131)
+        plt.imshow(hill, cmap="Greys_r", vmin=0, vmax=255)
+        plt.axis("off")
+        plt.subplot(132)
+        plt.title("dH/dt (m/a)")
+        plt.imshow(dhdt.sel(time=year).values, vmin=-4, vmax=4, cmap="RdBu")
+        plt.colorbar(aspect=10, fraction=0.05)
+        plt.axis("off")
+        #dhdt.sel(time=year).plot(vmin=-4, vmax=4, cmap="RdBu", aspect="equal", size=5)
+        plt.subplot(133)
+        plt.title("dH/dt² (m/a²)")
+        plt.imshow(dhdt2.sel(time=year).values, vmin=-2, vmax=2, cmap="PuOr")
+        plt.colorbar(aspect=10, fraction=0.05)
+        plt.axis("off")
+        plt.tight_layout()
+        plt.savefig(f"tinkarp/tinkarp_{year:.0f}.jpg", dpi=600)
+
+        continue
+        return
+
+        plt.show()
+        # plt.show()
+
+    print(yearly)
+    return
+
+    plt.subplot(132)
+    stack["elev_err"].plot(vmin=0, vmax=10, cmap="Reds")
+    hill = xdem.terrain.hillshade(stack["elev_est"].isel(time=-1).values, resolution=5)
+
+    plt.subplot(133)
+    plt.imshow(hill, cmap="Greys_r", vmin=0, vmax=255)
     plt.show()
+
+    # plt.subplot(122)
+    # stack[""].plot(vmin=0, vmax=3, cmap="Reds")
 
     # plt.scatter(point.time, point["ad_elevation"].values)
     # plt.plot(times + 2010, np.poly1d([point["poly_a"], point["poly_b"], point["poly_bias"]])(times))
