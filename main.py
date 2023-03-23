@@ -1132,7 +1132,13 @@ def process_all(show_progress_bar: bool = True):
 
 def glacier_stack(glacier="tinkarp", force_redo: bool = False):
 
-    nc_path = Path(glacier).joinpath("stack.nc")
+    temp_dir = get_temp_dir()
+    glacier_stack_dir = temp_dir.joinpath(f"glacier_stacks/{glacier}")
+    glacier_stack_dir.mkdir(parents=True, exist_ok=True)
+
+    nc_path = glacier_stack_dir.joinpath("stack.nc")
+    poly_path = nc_path.with_stem(nc_path.stem + "_poly")
+    stack_corr_path = poly_path.with_stem(poly_path.stem + "_corr")
 
     poi = shapely.geometry.box(*REGIONS[glacier])
 
@@ -1148,6 +1154,7 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False):
 
         dems_dir = Path("temp/arcticdem_coreg")
         ref_dem_path, ref_dem_years_path = build_npi_mosaic()
+        stable_terrain_path = build_stable_terrain_mask()
 
 
         i = 0
@@ -1194,13 +1201,24 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False):
         stack = xr.Dataset({"ad_elevation": xr.DataArray(arrays[:i, :, :], coords=[("time", times)] + xr_coords)})
         stack = stack.sortby("time")
 
+        with rio.open(stable_terrain_path) as raster:
+            window = rio.windows.from_bounds(*poi.bounds, transform=raster.transform)
+            data = raster.read(1, window=window, masked=True, boundless=True).filled(0)
+
+        stack["stable_terrain"] = xr.DataArray(data, coords=xr_coords) 
+
+        median_elevation = stack["ad_elevation"].median("time")
+
+        diffs = (stack["ad_elevation"] - median_elevation).where(stack["stable_terrain"] == 1).median(["x", "y"])
+        stack["ad_elevation"] = stack["ad_elevation"] - diffs
+
         stack.to_netcdf(
             nc_path, encoding={key: {"zlib": True, "complevel": 9} for key in stack.data_vars}, engine="h5netcdf"
         )
     else:
         stack = xr.open_dataset(nc_path)
 
-    if True:
+    if False:
         with rio.open("temp/stable_terrain.tif") as raster:
             window = rio.windows.from_bounds(*poi.bounds, transform=raster.transform)
             data = raster.read(1, window=window, masked=True, boundless=True).filled(0)
@@ -1258,7 +1276,6 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False):
 
         return array  # xr.Dataset(output)
 
-    poly_path = nc_path.with_stem(nc_path.stem + "_poly")
 
     if not poly_path.is_file():
         width = 1000
@@ -1351,7 +1368,6 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False):
         
         # return xr.DataArray(est, coords=array["ad_elevation"].coords)
 
-    stack_corr_path = poly_path.with_stem(poly_path.stem + "_corr")
 
     if not stack_corr_path.is_file():
 
@@ -1397,8 +1413,8 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False):
         point = stack.sel(**pois[name], method="nearest").dropna("time", how="any")
         plt.plot(point["time"], point["elev_est"], label="Estimated")
         plt.scatter(point["time"], point["ad_elevation"], label="Measured")
-    plt.show()
-    return
+    plt.close()
+    #return
 
     times = xr.DataArray(np.linspace(3 - (8 /12), 10, 50))
     yearly = estimate(stack, times=times).rename({"dim_0": "time"})
@@ -1411,6 +1427,8 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False):
 
     plt.close()
     plt.figure(figsize=(12, 5))
+    anim_dir = nc_path.parent.joinpath("anim/")
+    anim_dir.mkdir(exist_ok=True, parents=True)
     for year in yearly["time"].values:
         data = yearly.sel(time=year)
         hill = xdem.terrain.hillshade(data.values, resolution=5)
@@ -1430,7 +1448,7 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False):
         plt.colorbar(aspect=10, fraction=0.05)
         plt.axis("off")
         plt.tight_layout()
-        plt.savefig(f"tinkarp/tinkarp_{year:.2f}.jpg", dpi=600)
+        plt.savefig(anim_dir.joinpath(f"{glacier}_{year:.2f}.jpg"), dpi=600)
 
 
 
