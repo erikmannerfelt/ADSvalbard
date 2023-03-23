@@ -1351,7 +1351,7 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False):
     stack["elev_est"] = estimate(stack)
     stack["elev_err"] = xr.apply_ufunc(np.abs, stack["ad_elevation"] - stack["elev_est"]).median("time")
 
-    times = xr.DataArray(np.arange(10))
+    times = xr.DataArray(np.linspace(3 - (8 /12), 10, 50))
     yearly = estimate(stack, times=times).rename({"dim_0": "time"})
     dhdt = derivative(stack, times=times, level=1).rename({"dim_0": "time"})
     dhdt2 = derivative(stack, times=times,level=2).rename({"dim_0": "time"}) 
@@ -1365,7 +1365,7 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False):
     for year in yearly["time"].values:
         data = yearly.sel(time=year)
         hill = xdem.terrain.hillshade(data.values, resolution=5)
-        plt.suptitle(f"{year:.0f}")
+        plt.suptitle(f"{year:.2f}")
         plt.subplot(131)
         plt.imshow(hill, cmap="Greys_r", vmin=0, vmax=255)
         plt.axis("off")
@@ -1381,7 +1381,7 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False):
         plt.colorbar(aspect=10, fraction=0.05)
         plt.axis("off")
         plt.tight_layout()
-        plt.savefig(f"tinkarp/tinkarp_{year:.0f}.jpg", dpi=600)
+        plt.savefig(f"tinkarp/tinkarp_{year:.2f}.jpg", dpi=600)
 
         continue
         return
