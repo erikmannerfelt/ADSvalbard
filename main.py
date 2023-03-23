@@ -1134,21 +1134,21 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False):
 
     nc_path = Path(glacier).joinpath("stack.nc")
 
-    if not nc_path.is_file() or force_redo:
-        poi = shapely.geometry.box(*REGIONS[glacier])
+    poi = shapely.geometry.box(*REGIONS[glacier])
 
-        res = (5, 5)
-        width = int((poi.bounds[2] - poi.bounds[0]) / res[0])
-        height = int((poi.bounds[3] - poi.bounds[1]) / res[1])
-        transform = rio.transform.from_bounds(*poi.bounds, width, height)
+    res = (5, 5)
+    width = int((poi.bounds[2] - poi.bounds[0]) / res[0])
+    height = int((poi.bounds[3] - poi.bounds[1]) / res[1])
+    transform = rio.transform.from_bounds(*poi.bounds, width, height)
+    xr_coords = [
+        ("y", np.linspace(poi.bounds[1] + res[1] / 2, poi.bounds[3] - res[1] / 2, height)[::-1]),
+        ("x", np.linspace(poi.bounds[0] + res[0] / 2, poi.bounds[2] - res[0] / 2, width)),
+    ]
+    if not nc_path.is_file() or force_redo:
 
         dems_dir = Path("temp/arcticdem_coreg")
         ref_dem_path, ref_dem_years_path = build_npi_mosaic()
 
-        xr_coords = [
-            ("y", np.linspace(poi.bounds[1] + res[1] / 2, poi.bounds[3] - res[1] / 2, height)[::-1]),
-            ("x", np.linspace(poi.bounds[0] + res[0] / 2, poi.bounds[2] - res[0] / 2, width)),
-        ]
 
         i = 0
         arrays = []
@@ -1199,6 +1199,25 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False):
         )
     else:
         stack = xr.open_dataset(nc_path)
+
+    if True:
+        with rio.open("temp/stable_terrain.tif") as raster:
+            window = rio.windows.from_bounds(*poi.bounds, transform=raster.transform)
+            data = raster.read(1, window=window, masked=True, boundless=True).filled(0)
+
+        stack["stable_terrain"] = xr.DataArray(data, coords=xr_coords) 
+
+        median_elevation = stack["ad_elevation"].median("time")
+
+        diffs = (stack["ad_elevation"] - median_elevation).where(stack["stable_terrain"] == 1).median(["x", "y"])
+        stack["ad_elevation"] = stack["ad_elevation"] - diffs
+
+        plt.scatter(diffs["time"], diffs.values)
+
+        plt.show()
+            
+
+        return
 
     degree = 3
     names = ["poly_" + ("abcdefghijk"[i] if i != (degree) else "bias") for i in range(degree + 1)]
@@ -1332,24 +1351,54 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False):
         
         # return xr.DataArray(est, coords=array["ad_elevation"].coords)
 
-    for coef in names[:-1]:
-        stack[coef].values = skimage.filters.median(stack[coef].values, skimage.morphology.disk(4))
+    stack_corr_path = poly_path.with_stem(poly_path.stem + "_corr")
+
+    if not stack_corr_path.is_file():
+
+        for coef in names[:-1]:
+            stack[coef].values = skimage.filters.median(stack[coef].values, skimage.morphology.disk(4))
 
 
-    stack["elev_est"] = estimate(stack)
+        stack["elev_est"] = estimate(stack)
+        stack["elev_err"] = xr.apply_ufunc(np.abs, stack["ad_elevation"] - stack["elev_est"]).median("time")
+        #plt.subplot(131)
+        #stack["elev_err"].plot(vmin=0, vmax=10, cmap="Reds")
+        stack["poly_bias"] += (stack["ad_elevation"] - stack["elev_est"]).median("time")
 
-    point = stack.isel(x=0, y=0).dropna("time", how="any")
-    plt.scatter(point["time"], point["elev_est"])
-    plt.scatter(point["time"], point["ad_elevation"])
-    plt.close()
+        stack["elev_est"] = estimate(stack)
+        stack["elev_err"] = xr.apply_ufunc(np.abs, stack["ad_elevation"] - stack["elev_est"]).median("time")
+        stack.to_netcdf(
+            stack_corr_path, encoding={key: {"zlib": True, "complevel": 9} for key in stack.data_vars}, engine="h5netcdf"
+        )
+    else:
+        stack = xr.open_dataset(stack_corr_path)
 
-    stack["elev_err"] = xr.apply_ufunc(np.abs, stack["ad_elevation"] - stack["elev_est"]).median("time")
-    plt.subplot(131)
-    stack["elev_err"].plot(vmin=0, vmax=10, cmap="Reds")
-    stack["poly_bias"] += (stack["ad_elevation"] - stack["elev_est"]).median("time")
+    # stack["poly_a"].plot()
+    # plt.show()
 
-    stack["elev_est"] = estimate(stack)
-    stack["elev_err"] = xr.apply_ufunc(np.abs, stack["ad_elevation"] - stack["elev_est"]).median("time")
+    for coef in names:
+        continue
+        plt.figure(figsize=(8, 5))
+        plt.title(coef)
+        stack[coef].plot() 
+        plt.savefig(f"tinkarp/coefs/{coef}.jpg", dpi=300)
+
+    pois = {
+        "terminus": {"x": 551090, "y": 8658163},
+        "terminus_b": {"x": 551910, "y": 8657711},
+        "accumulation": {"x": 550250.90, "y": 8657357.22},
+        "off_glacier": {"x": 553000, "y": 8656000}
+    }
+    
+    plt.figure(figsize=(8, 8))
+    for i, name in enumerate(pois, start=1):
+        plt.subplot(2, int(np.ceil(len(pois) / 2)), i)
+        plt.title(name)
+        point = stack.sel(**pois[name], method="nearest").dropna("time", how="any")
+        plt.plot(point["time"], point["elev_est"], label="Estimated")
+        plt.scatter(point["time"], point["ad_elevation"], label="Measured")
+    plt.show()
+    return
 
     times = xr.DataArray(np.arange(10))
     yearly = estimate(stack, times=times).rename({"dim_0": "time"})
@@ -1383,152 +1432,6 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False):
         plt.tight_layout()
         plt.savefig(f"tinkarp/tinkarp_{year:.0f}.jpg", dpi=600)
 
-        continue
-        return
-
-        plt.show()
-        # plt.show()
-
-    print(yearly)
-    return
-
-    plt.subplot(132)
-    stack["elev_err"].plot(vmin=0, vmax=10, cmap="Reds")
-    hill = xdem.terrain.hillshade(stack["elev_est"].isel(time=-1).values, resolution=5)
-
-    plt.subplot(133)
-    plt.imshow(hill, cmap="Greys_r", vmin=0, vmax=255)
-    plt.show()
-
-    # plt.subplot(122)
-    # stack[""].plot(vmin=0, vmax=3, cmap="Reds")
-
-    # plt.scatter(point.time, point["ad_elevation"].values)
-    # plt.plot(times + 2010, np.poly1d([point["poly_a"], point["poly_b"], point["poly_bias"]])(times))
-    # plt.show()
-
-    return
-
-    # return
-
-    with tqdm() as progress_bar:
-        retval = scipy.optimize.least_squares(
-            cost, coefs_guess, kwargs={"data": y_vals, "time": x_vals, "progress_bar": progress_bar}
-        )
-
-    print(retval)
-    return
-
-    # plt.scatter(point.time, point["dhdt"].values)
-    # plt.show()
-    # return
-
-    # plt.scatter(point.time, (point["ad_elevation"] - point["linear_a"] * point["t"]).values)
-    # plt.show()
-
-    # return
-
-    coefs = np.polyfit(point.t.values, point.ad_elevation.values, deg=2)
-
-    times = np.linspace(point.t.min(), point.t.max())
-    plt.scatter(point.time, point["ad_elevation"].values)
-    # plt.plot(times + 2010, np.poly1d([point["poly_a"], point["poly_b"], point["poly_bias"]])(times))
-    plt.plot(times + 2010, np.poly1d(retval.x)(times))
-    # plt.plot(times + 2010, (times * float(point["linear_a"])) + float(point["linear_bias"]))
-    plt.plot(times + 2010, np.poly1d(coefs)(times))
-    plt.show()
-
-    # stack["dh"].isel(time=-1).plot(vmin=-10, vmax=10, cmap="RdBu")
-
-    # stack["dh"].where((stack["dh"].notnull().count() > 10000) & (stack["dt"] > 0.5)).dropna("time", how="all").isel(time=-1).plot(vmin=-5, vmax=5, cmap="RdBu")
-    # print(stack["dh"].mean("time") / stack["dt"].mean("time"))
-
-    # stack["dhdt"] = stack["dh"] / stack["dt"]
-
-    return
-
-    data_indices = np.sort(np.argwhere(~stack["ad_elevation"].isnull().values)[:, ::-1], axis=0)
-
-    print(data_indices[data_indices[:, 0] == 1])
-
-    # times_end = stack["time"].isel(time=data_indices[:, 0])
-    # times_start = stack["time"].isel(time=
-
-    return
-    times = stack["ad_elevation"].isel(time=data_indices[:, 0])
-
-    print(times)
-
-    return
-    dt = times.diff("time")
-
-    print(dt)
-    return
-    xys = stack["xy"].isel(xy=data_indices[:, 1])
-
-    print(times)
-    print(xys)
-    return
-    print(stack["xy"].isel(xy=data_indices[:, 1]))
-
-    stack["dh"] = stack["ad_elevation"].ffill("time").diff("time")
-
-    print(stack["dh"])
-
-    # return
-
-    # def process(array: xr.DataArray) -> xr.DataArray:
-
-    #    return array
-    #    ...
-
-    # print(stack["ad_elevation"].groupby("xy").map(process).unstack("xy"))
-
-    # print(stack["ad_elevation"].isel(xy=data_indices[:, 0], time=data_indices[:, 1]))
-
-    return
-
-    for path, name in [(ref_dem_path, "ref_elevation"), (ref_dem_years_path, "ref_elevation_year")]:
-        with rio.open(path) as raster:
-            window = rio.windows.from_bounds(*poi.bounds, transform=raster.transform)
-
-            data = raster.read(1, window=window, masked=True, boundless=True).astype("float32").filled(np.nan)
-
-            if name == "ref_elevation_year":
-                data += 8 / 12
-
-            stack[name] = xr.DataArray(data, coords=xr_coords)
-
-    stack["dt"] = stack["time"].broadcast_like(stack["ad_elevation"]) - stack["ref_elevation_year"].broadcast_like(
-        stack["ad_elevation"]
-    )
-
-    stack["dh"] = stack["ad_elevation"] - stack["ref_elevation"]
-
-    stack["dhdt"] = stack["dh"] / stack["dt"]
-    # stack["dhdt2"] = stack["dhdt"] / stack["dt"]
-
-    stack = stack.where(xr.apply_ufunc(np.abs, stack["dhdt"]).mean(["x", "y"]) < 2, drop=True)
-
-    # norm = (xr.apply_ufunc(np.abs, stack["dhdt"]).median("time")).clip(max=0.1)
-
-    # mask = xr.where((xr.apply_ufunc(np.abs,stack["dhdt"]) / norm) < 70, 0, np.nan)
-    mask = xr.where(xr.apply_ufunc(np.abs, stack["dhdt"]) < 5, 0, np.nan)
-
-    stack["dhdt"] = stack["dhdt"] + mask
-
-    yearly = stack["dhdt"].groupby(stack["time"].astype(int)).median()
-
-    for year in yearly["time"].values:
-        # if year == 2012:
-        #    continue
-        year_data = yearly.sel(time=year)
-
-        Path(glacier).mkdir(exist_ok=True)
-
-        year_data.clip(-3, 3).plot(cmap="RdBu", vmin=-3, vmax=3, aspect="equal", size=5)
-        plt.savefig(f"{glacier}/{glacier}_{year}.jpg", dpi=600)
-        # plt.show()
 
 
 def main():
