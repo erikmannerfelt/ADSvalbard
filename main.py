@@ -1529,7 +1529,7 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False):
 
         model = sklearn.pipeline.make_pipeline(
             sklearn.preprocessing.PolynomialFeatures(degree=degree),
-            sklearn.linear_model.RANSACRegressor(min_samples=2, max_trials=100),
+            sklearn.linear_model.RANSACRegressor(min_samples=2, max_trials=100, random_state=1),
         )
 
         # estimator = model.steps[-1][1].estimator_
@@ -1691,7 +1691,6 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False):
         stack[coef].plot()
         plt.savefig(f"tinkarp/coefs/{coef}.jpg", dpi=300)
 
-    # return
 
     times = xr.DataArray(np.linspace(3 - (8 / 12), 10, 50))
     yearly = estimate(stack, times=times).rename({"dim_0": "time"})
