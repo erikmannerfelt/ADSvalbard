@@ -11,7 +11,7 @@
       },
       "locked": {
         "lastModified": 1,
-        "narHash": "sha256-wFRiTu1RjOiPCZAdaSEDmepe4bJI/G16OPI3graUCLw=",
+        "narHash": "sha256-cbA+6QPcswXjL+9WF+XNNzspSVVCu8GhqQ3S8EKmEUo=",
         "path": "./base_env",
         "type": "path"
       },

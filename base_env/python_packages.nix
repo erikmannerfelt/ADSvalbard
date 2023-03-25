@@ -72,6 +72,146 @@ let
         ];
         setuptoolsCheckPhase = "true";
       };
+      intake-xarray = super.buildPythonPackage rec {
+
+        pname = "intake-xarray";
+        version = "0.6.1";
+        src = super.fetchPypi {
+          inherit pname version;
+          sha256 = "Y9wqi5N9j5ViVdj4ZB8I6mVLLZ6IaH7D0czGZGL6v54=";
+        };
+        setuptoolsCheckPhase = "true";
+
+        propagatedBuildInputs = with super; [
+            intake
+            xarray
+            zarr
+            dask
+            netcdf4
+            fsspec
+            msgpack
+            requests
+        ];
+
+      };
+      python-cmr = super.buildPythonPackage rec {
+        pname = "python-cmr";
+        version = "0.7.0";
+        src = super.fetchPypi {
+          inherit pname version;
+          sha256 = "0cP6FQUxk8/epmclLaEVL4Go7Pismhg2LNz+VJ1IobU=";
+        };
+        setuptoolsCheckPhase = "true";
+        propagatedBuildInputs = with super; [
+          requests
+        ];
+      };
+      bounded-pool-executor = super.buildPythonPackage rec {
+        pname = "bounded_pool_executor";
+        version = "0.0.3";
+        src = super.fetchPypi {
+          inherit pname version;
+          sha256 = "4JIiG8OK3lVeEGSDH57YAFgPo0pLbY6d082WFUlif24=";
+        };
+        setuptoolsCheckPhase = "true";
+
+      };
+      pqdm = super.buildPythonPackage rec {
+        pname = "pqdm";
+        version = "0.2.0";
+        src = super.fetchPypi {
+          inherit pname version;
+          sha256 = "2Z0B/kmNMntEDr/gjBTITg3J7M5hcu+aMflrsar06eM=";
+        };
+        setuptoolsCheckPhase = "true";
+        propagatedBuildInputs = with super; [
+          typing-extensions
+          self.bounded-pool-executor
+          tqdm
+        ];
+      };
+      tinynetrc = super.buildPythonPackage rec {
+        pname = "tinynetrc";
+        version = "1.3.1";
+        src = super.fetchPypi {
+          inherit pname version;
+          sha256 = "K5olbS5jBkO48JhfXoJszwvzcW4H5Zak9n/qs2PSVN8=";
+        };
+        setuptoolsCheckPhase = "true";
+
+      };
+      earthaccess = super.buildPythonPackage rec {
+        pname = "earthaccess";
+        version = "0.5.1";
+        # The installation only works for poetry normally, so this hack overrides the setup procedure to
+        # just use regular setuptools. Poetry and nix don't really mix well...
+        src = pkgs.stdenv.mkDerivation {
+          name = "${pname}-fixed";
+          src = pkgs.fetchFromGitHub {
+             owner="nsidc";
+             repo=pname;
+             rev="v${version}";
+             sha256="bSDhZOwIGwVKSU5H8B31urSSaQoIC1JDRoM8ddrMcrk=";
+          };
+          new_setup = pkgs.writeText "setup.py" ''
+            from setuptools import setup
+            setup(
+              name="${pname}",
+              version="v${version}",
+              packages=["${pname}", "${pname}.utils"],
+            )
+          '';
+          buildPhase = ''
+            rm poetry.lock
+            rm setup.py
+            rm pyproject.toml
+            cp $new_setup setup.py
+          '';
+          installPhase = ''
+            mkdir -p $out
+            cp -r ./* $out
+          '';
+        };
+        propagatedBuildInputs = with super; [
+          self.python-cmr
+          python-benedict
+          self.pqdm
+          requests
+          s3fs
+          fsspec
+          self.tinynetrc
+          multimethod
+
+        ];
+
+      };
+      icepyx = super.buildPythonPackage rec {
+        pname = "icepyx";
+        version = "0.7.0";
+        src = super.fetchPypi {
+          inherit pname version;
+          sha256 = "lVhUlURZhwjAGW5+M78CqGsxHFUW53diXQH6q3QRMrU=";
+        };
+        setuptoolsCheckPhase = "true";
+        buildInputs = with super; [
+          setuptools-scm
+        ];
+        propagatedBuildInputs = with super; [
+          backoff
+          datashader
+          self.earthaccess
+          geopandas
+          h5netcdf
+          h5py
+          holoviews
+          hvplot
+          intake
+          self.intake-xarray
+          matplotlib
+          requests
+          xarray
+        ];
+      };
     };
   };
 

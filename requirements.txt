@@ -13,3 +13,4 @@ mypy
 requests
 cdsapi
 bottleneck
+icepyx
