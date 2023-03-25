@@ -32,6 +32,8 @@ import sklearn.linear_model
 import sklearn.pipeline
 from tqdm.dask import TqdmCallback
 import skimage
+import dask
+import dask.dataframe
 
 
 REGIONS = {
@@ -1112,6 +1114,7 @@ def process_all(show_progress_bar: bool = True):
                         "No finite values in",
                         "No stable terrain pixels in window",
                         "Expected one value, found 0",
+                        "No overlapping stable terrain",
                     ]
                 ):
 
@@ -1155,7 +1158,6 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False):
         dems_dir = Path("temp/arcticdem_coreg")
         ref_dem_path, ref_dem_years_path = build_npi_mosaic()
         stable_terrain_path = build_stable_terrain_mask()
-
 
         i = 0
         arrays = []
@@ -1205,7 +1207,7 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False):
             window = rio.windows.from_bounds(*poi.bounds, transform=raster.transform)
             data = raster.read(1, window=window, masked=True, boundless=True).filled(0)
 
-        stack["stable_terrain"] = xr.DataArray(data, coords=xr_coords) 
+        stack["stable_terrain"] = xr.DataArray(data, coords=xr_coords)
 
         median_elevation = stack["ad_elevation"].median("time")
 
@@ -1218,12 +1220,298 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False):
     else:
         stack = xr.open_dataset(nc_path)
 
+    def block_median(array: xr.DataArray):
+
+        # array = array.stack({"xy": ["x", "y"]})
+
+        yearly = [year_data for _, year_data in array.groupby(array["time"].astype(int))]
+
+        dhdt_list = []
+        for i in range(1, len(yearly)):
+            points_before = yearly[i - 1]["ad_elevation"].rename({"time": "time0"})
+            points_after = yearly[i]["ad_elevation"].rename({"time": "time1"})
+
+            dhs = points_after - points_before
+            dts = points_after["time1"] - points_before["time0"]
+
+            dhdts = dhs / dts
+            dhdt_list.append(
+                dhdts.stack(time=["time0", "time1"])
+                .set_index(time="time1")
+                .reset_coords(drop=True)
+                .dropna("time", how="all")
+            )
+
+        dhdts = xr.combine_nested(dhdt_list, "time").median("time")
+
+        mid_time = np.mean([array["time"].max(), array["time"].min()])
+
+        dts = array["time"].broadcast_like(array["ad_elevation"]) - mid_time
+
+        elev_corr = array["ad_elevation"] + dhdts * dts
+
+        median_elevation = elev_corr - elev_corr.median("time")
+
+        mask = xr.apply_ufunc(np.abs, median_elevation) < 10
+
+        return array["ad_elevation"].where(mask)
+
+    if glacier == "tinkarp":
+        pois = {
+            "terminus": {"x": 551090, "y": 8658163},
+            "terminus_b": {"x": 551910, "y": 8657711},
+            "accumulation": {"x": 550250.90, "y": 8657357.22},
+            "off_glacier": {"x": 553000, "y": 8656000},
+        }
+    elif glacier == "dronbreen":
+        pois = {
+            "accumulation_prob": {"x": 539486, "y": 8668589},
+        }
+
+    else:
+        raise NotImplementedError()
+
+    width = 2000
+    poi_slices = {
+        k: {"x": slice(v["x"] - width / 2, v["x"] + width / 2), "y": slice(v["y"] + width / 2, v["y"] - width / 2)}
+        for k, v in pois.items()
+    }
+    degree = 2
+    names = ["poly_" + ("abcdefghijk"[i] if i != (degree) else "bias") for i in range(degree + 1)]
+
+    if True:
+
+        max_distance = 400
+
+        def fit_window(array: xr.Dataset, x_coord, y_coord):
+
+            # print(array.shape)
+            # unstacked = array.unstack().isel(x=0, y=0)
+            midpoint = array.sel(x=x_coord, y=y_coord)
+
+            # return xr.DataArray(np.reshape([0, 0, 0, 0], (1, 1, 4)), coords=[("y", [midpoint.y]), ("x", [midpoint.x]), ("coef", [0, 1, 2, 3])])
+
+            array["close_points"] = (
+                xr.apply_ufunc(np.abs, (midpoint["ad_elevation"] - array["ad_elevation_med_temp"])) < 1
+            )
+
+            points = array.where(array["close_points"], drop=True)
+
+            points["distance"] = xr.apply_ufunc(
+                np.sqrt, ((points["y"] - midpoint["y"]) ** 2 + (points["x"] - midpoint["x"]) ** 2)
+            ).broadcast_like(points["close_points"])
+            points = points.where(points["distance"] < width)
+            points["weight"] = 1 / (1 + points["distance"] / points["distance"].max())
+
+            points = (
+                points.stack(time2=["time", "y", "x"])
+                .set_index(time2="time")
+                .rename({"time2": "time"})
+                .reset_coords(drop=True)
+                .dropna("time", subset=["ad_elevation"])
+            )
+
+            model = sklearn.pipeline.make_pipeline(
+                sklearn.preprocessing.PolynomialFeatures(degree=degree),
+                sklearn.linear_model.RANSACRegressor(min_samples=2, max_trials=100, random_state=1),
+            )
+
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", "R^2 score is not well-defined")
+                model.fit(
+                    points["t"].values.reshape((-1, 1)),
+                    points["ad_elevation"],
+                    ransacregressor__sample_weight=points["weight"].values,
+                )
+            estimator = model.steps[-1][1].estimator_
+            return xr.DataArray(
+                np.r_[estimator.coef_[1:][::-1], [estimator.intercept_]].reshape((1, 1, -1)),
+                coords=[("y", [midpoint.y]), ("x", [midpoint.x]), ("coef", names)],
+                name="fit",
+            )
+
+            plt.scatter(points["time"], points["ad_elevation"], c=points["weight"])
+            plt.plot(points["time"].values, model.predict(points["time"].values.reshape((-1, 1))))
+            plt.show()
+
+            return height
+
+        def block_fit_window(array: xr.Dataset, xmin, xmax, ymin, ymax, step):
+
+            xstep_min = (step - 1) if ((array.x.min() != xmin) and array.x.shape[0] > (step - 2)) else 0
+            xstep_max = (array.x.shape[0] + 1 - step) if (array.x.max() != xmax) else array.x.shape[0]
+
+            ystep_min = (step - 1) if ((array.y.max() != ymax) and array.y.shape[0] > (step - 2)) else 0
+            ystep_max = (array.y.shape[0] + 1 - step) if (array.y.min() != ymin) else array.y.shape[0]
+            x_mids = np.arange(xstep_min, xstep_max)
+            y_mids = np.arange(ystep_min, ystep_max)
+
+            assert x_mids.shape[0] > 0
+            assert y_mids.shape[0] > 0
+            if False:
+                print(array["ad_elevation_med_temp"].shape, f"{xstep_min=}, {xstep_max=}, {ystep_min=}, {ystep_max=} {x_mids.shape=}, {y_mids.shape=}") 
+
+                template = xr.DataArray(
+                    np.zeros((array.y.shape[0], array.x.shape[0], len(names))),
+                    coords=[array.y, array.x, ("coef", names)],
+                    name="fit",
+                )
+                return template
+            vals = []
+            for x_mid in x_mids:
+                x_coord = array.x.values[x_mid]
+                for y_mid in y_mids:
+                    y_coord = array.y.values[y_mid]
+                    vals.append(
+                        fit_window(
+                            array.isel(
+                                x=slice(max(x_mid - step, 0), min(x_mid + step, array.x.shape[0])),
+                                y=slice(max(y_mid - step, 0), min(y_mid + step, array.y.shape[0])),
+                            ),
+                            y_coord=y_coord,
+                            x_coord=x_coord,
+                        )
+                    )
+            # for i in range(1, x_offs):
+            #     for j in range(1, y_offs):
+            #         vals.append(fit_window(array.isel(x=slice(x_offs[i -1], x_offs[i]), y=slice(y_offs[i], y_offs[i - 1]))))
+            #print("Hello")
+            
+            array["fit"] = xr.combine_by_coords(vals)["fit"]
+            #print(array)
+
+            # vals = xr.merge([array, xr.combine_by_coords(vals)], compat="override")
+
+            return array["fit"]
+
+        def map_blocks(array: xr.Dataset, patch_size: int = 30, side_looking: int = 30):
+
+            chunking = {k: (side_looking * 2 + patch_size - 2) for k in ["x", "y"]}
+
+            template = xr.DataArray(
+                np.empty((location.y.shape[0], location.x.shape[0], len(names))),
+                coords=[location.y, location.x, ("coef", names)],
+                name="fit",
+            ).chunk(chunking)
+
+            return location.chunk(chunking).map_blocks(
+                block_fit_window,
+                template=template,
+                kwargs=dict(xmin=array.x.min(), xmax=array.x.max(), ymin=array.y.min(), ymax=array.y.max(), step=side_looking),
+            )
+
+        stack["ad_elevation_med_temp"] = stack["ad_elevation"].median("time")
+        stack["t"] = stack["time"] - 2021
+        location = stack.sel(**poi_slices["accumulation_prob"])
+
+        #location = location.isel(x=slice(0, chunking["x"]), y=slice(0, chunking["y"])).chunk(chunking)
+
+        # location = location.assign_coords({"coef": names})
+        # location["fit"] = ("y", "x", "coef"), np.empty((location.y.shape[0], location.x.shape[0], len(names)))
+
+        location["fit"] = map_blocks(location)
+        with TqdmCallback():
+            location.compute(scheduler="processes")
+
+        # vals = block_fit_window(location.compute())
+
+        plt.imshow(location["fit"].isel(coef=-1).values)
+        plt.show()
+        return
+
+        # x_vals = location["x"].isel(x=np.arange(30, location["x"].shape[0], 60))
+        # y_vals = location["y"].isel(y=np.arange(30, location["y"].shape[0], 60))
+
+        with dask.config.set(**{"array.slicing.split_large_chunks": True}):
+
+            # vals = location.chunk(x=256, y=256).rolling(x=30, y=30).construct(x="kx", y="ky").stack(xy=["x", "y"]).set_index(xy="x").reset_coords(drop=True).chunk(xy=256).to_dask_dataframe()
+            # with tqdm() as progress_bar:
+            #    vals = location.chunk(x=15, y=15).rolling(x=30, y=30, center=True).construct(x="kx", y="ky").stack(xy=["x", "y"]).groupby("xy").apply(fit_window, progress_bar=progress_bar)
+
+            vals = location.map_blocks(block_fit_window, template=location["ad_elevation_med_temp"])
+            with TqdmCallback():
+                vals.compute(scheduler="processes")
+
+            print(vals)
+
+            return
+
+            vals = (
+                stack["ad_elevation"]
+                .chunk(x=256, y=256)
+                .rolling(x=30, y=30, center=True)
+                .construct(x="kx", y="ky")
+                .stack(xy=["x", "y"])
+                .chunk(xy=100)
+                .reduce(apply, dim=["kx", "ky", "time"], times=stack["time"].values, chunksize=30)
+            )
+
+            print(vals.__dask_scheduler__)
+
+            vals = xr.DataArray(
+                vals.values.reshape((location.y.shape[0], location.x.shape[0], 4)),
+            )
+            print(vals)
+            return
+            print(
+                vals.assign_coords(
+                    xy=pd.MultiIndex.from_arrays(
+                        [vals.x.values, vals.y.values, np.repeat(np.arange(4), int(vals.y.values.shape[0] / 4))]
+                    )
+                )
+            )
+            # vals.coords["coef"] = np.repeat(np.arange(4), int(vals.shape[0] / 4))
+
+        return
+
+        with dask.config.set(**{"array.slicing.split_large_chunks": False}):
+            print(
+                xr.apply_ufunc(
+                    apply,
+                    location["ad_elevation"]
+                    .chunk(x=30, y=30)
+                    .rolling(x=30, y=30)
+                    .construct(x="kx", y="ky")
+                    .stack(xy=["x", "y"]),
+                    input_core_dims=[["xy"]],
+                    output_core_dims=[["xy"]],
+                    kwargs={"times": location["time"].values, "chunksize": 30},
+                    dask="allowed",
+                )
+            )
+
+        # fit_window(location.to_dask_dataframe().compute(), height=location["y"].shape[0], width=location["x"].shape[0], n_times=location["time"].shape[0])
+
+        # location = location.where(~location["ad_elevation"].isnull().any("time"), drop=True)
+
+        # location["ad_elevation"].median("time").plot()
+        # plt.show()
+        # print(location.map_blocks(fit_window, template=location))
+
+        return
+
+    if False:
+        stack = stack.sel(**pois["terminus_b"], method="nearest")
+
+        stack["elev_filtered"] = block_median(stack)
+
+        # point = stack.isel(x=0, y=0)
+        point = stack
+
+        plt.scatter(point["time"], point["ad_elevation"])
+        plt.scatter(point["time"], point["elev_filtered"])
+        plt.show()
+
+        print(stack)
+
+        return
+
     if False:
         with rio.open("temp/stable_terrain.tif") as raster:
             window = rio.windows.from_bounds(*poi.bounds, transform=raster.transform)
             data = raster.read(1, window=window, masked=True, boundless=True).filled(0)
 
-        stack["stable_terrain"] = xr.DataArray(data, coords=xr_coords) 
+        stack["stable_terrain"] = xr.DataArray(data, coords=xr_coords)
 
         median_elevation = stack["ad_elevation"].median("time")
 
@@ -1233,12 +1521,8 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False):
         plt.scatter(diffs["time"], diffs.values)
 
         plt.show()
-            
 
         return
-
-    degree = 3
-    names = ["poly_" + ("abcdefghijk"[i] if i != (degree) else "bias") for i in range(degree + 1)]
 
     def fit_trend(array: xr.DataArray):
         xs = array["t"].values
@@ -1253,8 +1537,8 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False):
             if progress_bar is not None:
                 progress_bar.update()
             mask = np.isfinite(y_vals + xs)
-            if np.count_nonzero(mask) < 4:
-                return [np.nan] * 3
+            if np.count_nonzero(mask) < 3:
+                return [np.nan] * (degree + 1)
 
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", "R^2 score is not well-defined")
@@ -1275,7 +1559,6 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False):
             array[coef] = xr.DataArray(coefs[:, :, i], coords=[array.y, array.x])
 
         return array  # xr.Dataset(output)
-
 
     if not poly_path.is_file():
         width = 1000
@@ -1302,7 +1585,7 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False):
         stack = stack.map_blocks(fit_trend, template=stack)
         # stack = fit_trend(stack)
 
-        with TqdmCallback(smoothing=0.1, desc="Fitting polynomial"):
+        with TqdmCallback(smoothing=0.1, desc="Fitting polynomials"):
             stack = stack.compute(scheduler="processes")
 
         stack.to_netcdf(
@@ -1311,6 +1594,15 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False):
     else:
         stack = xr.open_dataset(poly_path)
 
+    plt.figure(figsize=(8, 8))
+    for i, name in enumerate(pois, start=1):
+        plt.subplot(2, int(np.ceil(len(pois) / 2)), i)
+        plt.title(name)
+        point = stack.sel(**pois[name], method="nearest").dropna("time", how="any")
+        # plt.plot(point["time"], point["elev_est"], label="Estimated")
+        plt.scatter(point["time"], point["ad_elevation"], label="Measured")
+    plt.show()
+    return
     # times = np.linspace(point.t.min(), point.t.max())
 
     # print(stack["poly_bias"].values.shape)
@@ -1345,12 +1637,12 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False):
         else:
             out_times = times
 
-        #out = np.moveaxis(
+        # out = np.moveaxis(
         #    np.repeat(array["poly_bias"].values, times.shape[0]).reshape(array["poly_bias"].shape + (times.shape[0],)),
         #    2,
         #    0,
-        #)
-        out = np.zeros((times.shape[0],) + array["poly_bias"].shape )
+        # )
+        out = np.zeros((times.shape[0],) + array["poly_bias"].shape)
         times_arr = np.repeat(times.values, np.prod(out.shape[1:])).reshape(out.shape)
         for i, coef in enumerate(names[:-level]):
             arr = np.moveaxis(
@@ -1360,31 +1652,31 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False):
             )
             new_exponent = degree - i - level
             factor = np.prod([range(new_exponent + 1, degree - i + 1)])
-            out += factor * arr * (times_arr ** new_exponent if new_exponent != 0 else 1)
+            out += factor * arr * (times_arr**new_exponent if new_exponent != 0 else 1)
 
-            #print(f"{coef}: {factor} * val * x ^ {new_exponent}")
+            # print(f"{coef}: {factor} * val * x ^ {new_exponent}")
 
         return xr.DataArray(out, coords=[out_times, array.y, array.x])
-        
-        # return xr.DataArray(est, coords=array["ad_elevation"].coords)
 
+        # return xr.DataArray(est, coords=array["ad_elevation"].coords)
 
     if not stack_corr_path.is_file():
 
         for coef in names[:-1]:
             stack[coef].values = skimage.filters.median(stack[coef].values, skimage.morphology.disk(4))
 
-
         stack["elev_est"] = estimate(stack)
         stack["elev_err"] = xr.apply_ufunc(np.abs, stack["ad_elevation"] - stack["elev_est"]).median("time")
-        #plt.subplot(131)
-        #stack["elev_err"].plot(vmin=0, vmax=10, cmap="Reds")
+        # plt.subplot(131)
+        # stack["elev_err"].plot(vmin=0, vmax=10, cmap="Reds")
         stack["poly_bias"] += (stack["ad_elevation"] - stack["elev_est"]).median("time")
 
         stack["elev_est"] = estimate(stack)
         stack["elev_err"] = xr.apply_ufunc(np.abs, stack["ad_elevation"] - stack["elev_est"]).median("time")
         stack.to_netcdf(
-            stack_corr_path, encoding={key: {"zlib": True, "complevel": 9} for key in stack.data_vars}, engine="h5netcdf"
+            stack_corr_path,
+            encoding={key: {"zlib": True, "complevel": 9} for key in stack.data_vars},
+            engine="h5netcdf",
         )
     else:
         stack = xr.open_dataset(stack_corr_path)
@@ -1396,34 +1688,18 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False):
         continue
         plt.figure(figsize=(8, 5))
         plt.title(coef)
-        stack[coef].plot() 
+        stack[coef].plot()
         plt.savefig(f"tinkarp/coefs/{coef}.jpg", dpi=300)
 
-    pois = {
-        "terminus": {"x": 551090, "y": 8658163},
-        "terminus_b": {"x": 551910, "y": 8657711},
-        "accumulation": {"x": 550250.90, "y": 8657357.22},
-        "off_glacier": {"x": 553000, "y": 8656000}
-    }
-    
-    plt.figure(figsize=(8, 8))
-    for i, name in enumerate(pois, start=1):
-        plt.subplot(2, int(np.ceil(len(pois) / 2)), i)
-        plt.title(name)
-        point = stack.sel(**pois[name], method="nearest").dropna("time", how="any")
-        plt.plot(point["time"], point["elev_est"], label="Estimated")
-        plt.scatter(point["time"], point["ad_elevation"], label="Measured")
-    plt.close()
-    #return
+    # return
 
-    times = xr.DataArray(np.linspace(3 - (8 /12), 10, 50))
+    times = xr.DataArray(np.linspace(3 - (8 / 12), 10, 50))
     yearly = estimate(stack, times=times).rename({"dim_0": "time"})
     dhdt = derivative(stack, times=times, level=1).rename({"dim_0": "time"})
-    dhdt2 = derivative(stack, times=times,level=2).rename({"dim_0": "time"}) 
+    dhdt2 = derivative(stack, times=times, level=2).rename({"dim_0": "time"})
 
     for arr in [yearly, dhdt, dhdt2]:
         arr["time"] = arr["time"] + stack["time"].min()
-
 
     plt.close()
     plt.figure(figsize=(12, 5))
@@ -1441,7 +1717,7 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False):
         plt.imshow(dhdt.sel(time=year).values, vmin=-4, vmax=4, cmap="RdBu")
         plt.colorbar(aspect=10, fraction=0.05)
         plt.axis("off")
-        #dhdt.sel(time=year).plot(vmin=-4, vmax=4, cmap="RdBu", aspect="equal", size=5)
+        # dhdt.sel(time=year).plot(vmin=-4, vmax=4, cmap="RdBu", aspect="equal", size=5)
         plt.subplot(133)
         plt.title("dH/dt² (m/a²)")
         plt.imshow(dhdt2.sel(time=year).values, vmin=-2, vmax=2, cmap="PuOr")
@@ -1449,7 +1725,6 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False):
         plt.axis("off")
         plt.tight_layout()
         plt.savefig(anim_dir.joinpath(f"{glacier}_{year:.2f}.jpg"), dpi=600)
-
 
 
 def main():
