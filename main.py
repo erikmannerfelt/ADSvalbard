@@ -1133,6 +1133,53 @@ def process_all(show_progress_bar: bool = True):
                 progress_bar.update()
 
 
+def fit_window_rolling(array: xr.Dataset, resolution: float, max_distance: float, names: list[str]):
+
+    array = array.isel(x=0, y=0)
+    rx_shape = array.ad_elevation.shape[1]
+    ry_shape = array.ad_elevation.shape[2]
+    mid_xi = (rx_shape // 2) - 1
+    mid_yi = (ry_shape // 2) - 1
+    midpoint = array.isel(rx=mid_xi, ry=mid_yi)
+
+    array["distance"] = ("rx", "ry"), np.sqrt(np.sum(np.square(np.meshgrid((np.arange(ry_shape) - mid_yi) * resolution, (np.arange(rx_shape) - mid_xi) * resolution)), axis=0))
+
+    array["close_points"] = (
+        xr.apply_ufunc(np.abs, (midpoint["ad_elevation_med_temp"] - array["ad_elevation_med_temp"])) < 1
+    )
+
+    points = array.where(array["close_points"] & (array["distance"] < max_distance)).stack(rxrytime=["rx", "ry", "time"]).dropna("rxrytime", how="all", subset=["ad_elevation"]).set_index(rxrytime="time").rename(rxrytime="time")
+
+    if points["ad_elevation"].shape[0] == 0:
+        return xr.DataArray(
+            np.zeros((1, 1, len(names))) + np.nan,
+            coords=[("y", [midpoint.y]), ("x", [midpoint.x]), ("coef", names)],
+            name="fit",
+        )
+
+    points["weight"] = 1 / (1 + points["distance"] / points["distance"].max())
+
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", "R^2 score is not well-defined")
+        warnings.simplefilter("ignore")
+        model = sklearn.pipeline.make_pipeline(
+            sklearn.preprocessing.PolynomialFeatures(degree=len(names) - 1),
+            sklearn.linear_model.RANSACRegressor(min_samples=2, max_trials=100, random_state=1),
+        )
+        model.fit(
+            points["t"].values.reshape((-1, 1)),
+            points["ad_elevation"],
+            ransacregressor__sample_weight=points["weight"].values,
+        )
+        estimator = model.steps[-1][1].estimator_
+        return xr.DataArray(
+            np.r_[estimator.coef_[1:][::-1], [estimator.intercept_]].reshape((1, 1, -1)),
+            coords=[("y", [midpoint.y]), ("x", [midpoint.x]), ("coef", names)],
+            name="fit",
+        )
+
+
 def glacier_stack(glacier="tinkarp", force_redo: bool = False):
 
     temp_dir = get_temp_dir()
@@ -1311,24 +1358,25 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False):
                 .dropna("time", subset=["ad_elevation"])
             )
 
-            model = sklearn.pipeline.make_pipeline(
-                sklearn.preprocessing.PolynomialFeatures(degree=degree),
-                sklearn.linear_model.RANSACRegressor(min_samples=2, max_trials=100, random_state=1),
-            )
 
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", "R^2 score is not well-defined")
+                warnings.simplefilter("ignore")
+                model = sklearn.pipeline.make_pipeline(
+                    sklearn.preprocessing.PolynomialFeatures(degree=degree),
+                    sklearn.linear_model.RANSACRegressor(min_samples=2, max_trials=100, random_state=1),
+                )
                 model.fit(
                     points["t"].values.reshape((-1, 1)),
                     points["ad_elevation"],
                     ransacregressor__sample_weight=points["weight"].values,
                 )
-            estimator = model.steps[-1][1].estimator_
-            return xr.DataArray(
-                np.r_[estimator.coef_[1:][::-1], [estimator.intercept_]].reshape((1, 1, -1)),
-                coords=[("y", [midpoint.y]), ("x", [midpoint.x]), ("coef", names)],
-                name="fit",
-            )
+                estimator = model.steps[-1][1].estimator_
+                return xr.DataArray(
+                    np.r_[estimator.coef_[1:][::-1], [estimator.intercept_]].reshape((1, 1, -1)),
+                    coords=[("y", [midpoint.y]), ("x", [midpoint.x]), ("coef", names)],
+                    name="fit",
+                )
 
             plt.scatter(points["time"], points["ad_elevation"], c=points["weight"])
             plt.plot(points["time"].values, model.predict(points["time"].values.reshape((-1, 1))))
@@ -1409,9 +1457,32 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False):
         # location = location.assign_coords({"coef": names})
         # location["fit"] = ("y", "x", "coef"), np.empty((location.y.shape[0], location.x.shape[0], len(names)))
 
-        location["fit"] = map_blocks(location)
-        with TqdmCallback():
-            location.compute(scheduler="processes")
+        chunking={"x": 1, "y": 1}
+
+        # ds.rolling(x=2, y=2).construct(x="kx", y="ky").stack(kxkytime=["kx", "ky", "time"]).set_index(kxkytime="time").rename(kxkytime="time").reset_coords(drop=True)
+        #location = location.isel(x=slice(0, 60), y=slice(0, 60))
+        window_size = int(np.ceil(max_distance / res[0]))
+
+        template = xr.DataArray(
+            np.empty((location.y.shape[0], location.x.shape[0], len(names))),
+            coords=[location.y, location.x, ("coef", names)],
+            name="fit",
+        ).chunk(chunking)
+        rolling = location.chunk(chunking).rolling(x=window_size, y=window_size, center=True, min_periods=1).construct(x="rx", y="ry").chunk(chunking)
+
+        mapped = xr.map_blocks(fit_window_rolling, rolling, kwargs=dict(names=names, max_distance=max_distance, resolution=res[0]), template=template)
+        with TqdmCallback(desc="Fitting curves", smoothing=0.1):
+            mapped.compute()
+
+        print("Saving")
+
+        mapped.to_netcdf("test_map_blocks.nc")
+        
+        return
+
+        #location["fit"] = map_blocks(location)
+        #with TqdmCallback():
+        #    location.compute(scheduler="processes")
 
         # vals = block_fit_window(location.compute())
 
