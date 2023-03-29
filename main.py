@@ -33,8 +33,11 @@ import sklearn.pipeline
 from tqdm.dask import TqdmCallback
 import skimage
 import dask
-import dask.dataframe
+import dask.dataframe as dd
+import dask.array as da
 
+warnings.simplefilter("ignore", RuntimeWarning)
+np.seterr(all="ignore")
 
 REGIONS = {
     "dronbreen": [536837.5, 8667472.5, 544677.5, 8679002.5],
@@ -1142,13 +1145,26 @@ def fit_window_rolling(array: xr.Dataset, resolution: float, max_distance: float
     mid_yi = (ry_shape // 2) - 1
     midpoint = array.isel(rx=mid_xi, ry=mid_yi)
 
-    array["distance"] = ("rx", "ry"), np.sqrt(np.sum(np.square(np.meshgrid((np.arange(ry_shape) - mid_yi) * resolution, (np.arange(rx_shape) - mid_xi) * resolution)), axis=0))
+    array["distance"] = ("rx", "ry"), np.sqrt(
+        np.sum(
+            np.square(
+                np.meshgrid((np.arange(ry_shape) - mid_yi) * resolution, (np.arange(rx_shape) - mid_xi) * resolution)
+            ),
+            axis=0,
+        )
+    )
 
     array["close_points"] = (
         xr.apply_ufunc(np.abs, (midpoint["ad_elevation_med_temp"] - array["ad_elevation_med_temp"])) < 1
     )
 
-    points = array.where(array["close_points"] & (array["distance"] < max_distance)).stack(rxrytime=["rx", "ry", "time"]).dropna("rxrytime", how="all", subset=["ad_elevation"]).set_index(rxrytime="time").rename(rxrytime="time")
+    points = (
+        array.where(array["close_points"] & (array["distance"] < max_distance))
+        .stack(rxrytime=["rx", "ry", "time"])
+        .dropna("rxrytime", how="all", subset=["ad_elevation"])
+        .set_index(rxrytime="time")
+        .rename(rxrytime="time")
+    )
 
     if points["ad_elevation"].shape[0] == 0:
         return xr.DataArray(
@@ -1158,7 +1174,6 @@ def fit_window_rolling(array: xr.Dataset, resolution: float, max_distance: float
         )
 
     points["weight"] = 1 / (1 + points["distance"] / points["distance"].max())
-
 
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", "R^2 score is not well-defined")
@@ -1179,6 +1194,188 @@ def fit_window_rolling(array: xr.Dataset, resolution: float, max_distance: float
             name="fit",
         )
 
+
+def ransac_fit(heights: da.Array | np.ndarray, time: da.Array | np.ndarray, degree: int):
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        inlier_mask = np.isfinite(heights)
+        if heights.shape[0] == 1 or (np.count_nonzero(inlier_mask) < 2):
+            return [np.nan] * (degree + 1)
+
+        model = sklearn.pipeline.make_pipeline(
+            sklearn.preprocessing.PolynomialFeatures(degree=degree),
+            sklearn.linear_model.RANSACRegressor(min_samples=2, max_trials=100, random_state=1),
+        )
+        model.fit(
+            time[inlier_mask].reshape((-1, 1)),
+            heights[inlier_mask],
+            # ransacregressor__sample_weight=points["weight"].values,
+        )
+        estimator = model.steps[-1][1].estimator_
+
+        return np.r_[estimator.coef_[1:][::-1], [estimator.intercept_]]
+
+
+def apply_ransac_fit(arr: da.Array, time: da.Array, res: tuple[float, float], max_distance: float, degree: int):
+    arr = da.array(arr)
+
+    window_size = arr.shape[-1]
+    window_mid = window_size // 2
+
+    median_elev = da.median(arr, axis=0)
+    mid_median_elev = (
+        median_elev[:, :, window_mid, window_mid]
+        .reshape(
+            median_elev.shape[:2]
+            + (
+                1,
+                1,
+            )
+        )
+        .repeat(window_size, axis=2)
+        .repeat(window_size, axis=3)
+    )
+
+    elev_mask = da.zeros_like(arr, dtype="bool")
+    elev_mask[:, :, :, :, :] = (
+        (da.abs(median_elev - mid_median_elev) < 1).reshape((1,) + median_elev.shape).repeat(arr.shape[0], axis=0)
+    )
+
+    distance_mask = da.zeros_like(arr, dtype="bool")
+
+    distance_mask[:, :, :] = (
+        (
+            da.sqrt(
+                da.sum(
+                    da.dstack(
+                        da.meshgrid(
+                            ((da.arange(window_size) - window_mid) * res[0]) ** 2,
+                            ((da.arange(window_size) - window_mid) * res[0]) ** 2,
+                        )
+                    ),
+                    axis=2,
+                )
+            )
+            < (max_distance / 2)
+        )
+        .reshape(
+            (
+                1,
+                1,
+                1,
+            )
+            + arr.shape[3:]
+        )
+        .repeat(arr.shape[0], axis=0)
+        .repeat(arr.shape[1], axis=1)
+        .repeat(arr.shape[2], axis=2)
+    )
+    # distance_mask = np.repeat(np.repeat((np.sqrt(np.sum(np.square(np.meshgrid(*([(np.arange(window_size) - window_mid) * res[0]] * 2))), axis=0)) < (max_distance / 2)).reshape((1, 1,) + median_elev.shape[2:]), median_elev.shape[0], axis=0), median_elev.shape[1], axis=1)
+
+    # mask = (elev_mask & distance_mask).reshape((1,) + elev_mask.shape).repeat(arr.shape[0], axis=0)
+    mask = elev_mask & distance_mask
+
+    arr[mask] = np.nan
+
+    heights = da.moveaxis(arr, 0, 2).reshape(median_elev.shape[:2] + (-1,))
+
+    result = da.moveaxis(da.apply_along_axis(ransac_fit, axis=2, arr=heights, time=time, degree=degree), 2, 0)
+
+    return result
+
+def weighted_quantiles(values, weights, quantiles=0.5):
+
+    i = values.argsort()
+    sorted_weights = weights[i]
+    sorted_values = values[i]
+    Sn = sorted_weights.cumsum()
+
+    return sorted_values[np.searchsorted(Sn, quantiles * Sn[-1])]
+
+def _better_median(arr: da.Array, weights, orig_shape):
+
+    finites = ~np.isfinite(arr)
+
+    arr = arr[finites]
+    if arr.size < 2:
+        return np.nan
+    weights = weights[finites]
+
+
+    return weighted_quantiles(arr, weights)
+
+    
+    if arr.size == 1 or np.isnan(arr).all():
+        return np.nan
+
+    return np.nanmedian(arr)
+
+def better_median(arr: da.Array, axis):
+
+    if axis != (3, 4):
+        raise ValueError
+
+    distance = (
+            da.sqrt(
+                da.sum(
+                    da.dstack(
+                        da.meshgrid(
+                            ((da.arange(arr.shape[-2]) - arr.shape[-2] // 2)) ** 2,
+                            ((da.arange(arr.shape[-1]) - arr.shape[-1] // 2)) ** 2,
+                        )
+                    ),
+                    axis=2,
+                )
+            )
+        )
+
+    weights = 1 / distance.ravel()
+
+    arr = arr.reshape(arr.shape[:-2] + (-1,))
+
+    return da.apply_along_axis(_better_median, -1, arr, weights=weights, orig_shape=arr.shape)
+   
+
+    #return np.nanmedian(arr, axis=-1)
+
+def apply_groupby(subset: xr.DataArray, window_size: int, names: list[str]):
+
+    
+    rolled = (
+        subset["ad_elevation"]
+        #.swap_dims({"bin": "stacked_y_x"})
+        .unstack()
+        .rolling(x=window_size, y=window_size, center=True, min_periods=1)
+        .reduce(better_median)
+        #.median(["y", "x"])
+        .stack(stacked_y_x=["y", "x"])
+    )
+    #print(rolled.isel(stacked_y_x=rolled.stacked_y_x.shape[0] // 2).compute())
+    rolled = rolled.where(subset["ad_elevation_med_temp"].notnull())#.swap_dims({"bin": "stacked_y_x"}).notnull())#.swap_dims({"stacked_y_x": "bin"})
+
+    #return rolled.reset_coords(drop=True)
+
+    return xr.DataArray(da.apply_along_axis(ransac_fit, axis=0, arr=rolled, time=subset["t"].values, degree=len(names) - 1), coords=[("coef", names), rolled["stacked_y_x"]])
+
+def block_polyfit(rolled: xr.DataArray, res, max_distance, times, names):
+    
+    return xr.apply_ufunc(
+        apply_ransac_fit,
+        rolled,
+        input_core_dims=[
+            (
+                "time",
+                "y",
+                "x",
+                "ry",
+                "rx",
+            )
+        ],
+        output_core_dims=[("time", "y", "x")],
+        exclude_dims=set(["rx", "ry", "time"]),
+        dask="allowed",
+        kwargs=dict(res=res, max_distance=max_distance, time=times, degree=len(names) - 1),
+    ).rename(time="coef").assign_coords(coef=names)
 
 def glacier_stack(glacier="tinkarp", force_redo: bool = False):
 
@@ -1265,43 +1462,7 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False):
             nc_path, encoding={key: {"zlib": True, "complevel": 9} for key in stack.data_vars}, engine="h5netcdf"
         )
     else:
-        stack = xr.open_dataset(nc_path)
-
-    def block_median(array: xr.DataArray):
-
-        # array = array.stack({"xy": ["x", "y"]})
-
-        yearly = [year_data for _, year_data in array.groupby(array["time"].astype(int))]
-
-        dhdt_list = []
-        for i in range(1, len(yearly)):
-            points_before = yearly[i - 1]["ad_elevation"].rename({"time": "time0"})
-            points_after = yearly[i]["ad_elevation"].rename({"time": "time1"})
-
-            dhs = points_after - points_before
-            dts = points_after["time1"] - points_before["time0"]
-
-            dhdts = dhs / dts
-            dhdt_list.append(
-                dhdts.stack(time=["time0", "time1"])
-                .set_index(time="time1")
-                .reset_coords(drop=True)
-                .dropna("time", how="all")
-            )
-
-        dhdts = xr.combine_nested(dhdt_list, "time").median("time")
-
-        mid_time = np.mean([array["time"].max(), array["time"].min()])
-
-        dts = array["time"].broadcast_like(array["ad_elevation"]) - mid_time
-
-        elev_corr = array["ad_elevation"] + dhdts * dts
-
-        median_elevation = elev_corr - elev_corr.median("time")
-
-        mask = xr.apply_ufunc(np.abs, median_elevation) < 10
-
-        return array["ad_elevation"].where(mask)
+        stack = xr.open_dataset(nc_path, chunks={"x": 10, "y": 10})
 
     if glacier == "tinkarp":
         pois = {
@@ -1318,7 +1479,7 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False):
     else:
         raise NotImplementedError()
 
-    width = 2000
+    width = 300
     poi_slices = {
         k: {"x": slice(v["x"] - width / 2, v["x"] + width / 2), "y": slice(v["y"] + width / 2, v["y"] - width / 2)}
         for k, v in pois.items()
@@ -1326,475 +1487,407 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False):
     degree = 2
     names = ["poly_" + ("abcdefghijk"[i] if i != (degree) else "bias") for i in range(degree + 1)]
 
-    if True:
-
+    if False:
         max_distance = 400
 
-        def fit_window(array: xr.Dataset, x_coord, y_coord):
+        stack["ad_elevation_med_temp"] = stack["ad_elevation"].median("time")
+        stack["t"] = stack["time"] - 2021
+        location = stack.sel(**poi_slices["accumulation_prob"])
+        location["ad_elevation_med_temp"].compute(scheduler="processes")
 
-            # print(array.shape)
-            # unstacked = array.unstack().isel(x=0, y=0)
-            midpoint = array.sel(x=x_coord, y=y_coord)
+        location["ad_elevation"] = location["ad_elevation"].astype("float16")
 
-            # return xr.DataArray(np.reshape([0, 0, 0, 0], (1, 1, 4)), coords=[("y", [midpoint.y]), ("x", [midpoint.x]), ("coef", [0, 1, 2, 3])])
+        min_elev = float(location["ad_elevation_med_temp"].min())
+        max_elev = float(location["ad_elevation_med_temp"].max())
 
-            array["close_points"] = (
-                xr.apply_ufunc(np.abs, (midpoint["ad_elevation"] - array["ad_elevation_med_temp"])) < 1
-            )
+        step = 2
+        h_bins = np.arange(min_elev, max_elev + step, step)
 
-            points = array.where(array["close_points"], drop=True)
+        location["bin"] = ("y", "x"), np.digitize(location["ad_elevation_med_temp"], h_bins)
+        window_size = int(np.ceil(max_distance / res[0]))
+        if window_size % 2 == 0:
+            window_size += 1
 
-            points["distance"] = xr.apply_ufunc(
-                np.sqrt, ((points["y"] - midpoint["y"]) ** 2 + (points["x"] - midpoint["x"]) ** 2)
-            ).broadcast_like(points["close_points"])
-            points = points.where(points["distance"] < width)
-            points["weight"] = 1 / (1 + points["distance"] / points["distance"].max())
+        #print(stacked.assign_coords(bins=("stacked_y_x", stacked["bins"].data)))
+        #stacked = location.stack(stacked_y_x=["y", "x"]).swap_dims({"stacked_y_x": "bin"}).sortby("bin")
+        import dask
 
-            points = (
-                points.stack(time2=["time", "y", "x"])
-                .set_index(time2="time")
-                .rename({"time2": "time"})
-                .reset_coords(drop=True)
-                .dropna("time", subset=["ad_elevation"])
-            )
+        with dask.config.set(**{"array.slicing.split_large_chunks": True}):
+            polyfit = location.stack(stacked_y_x=["y", "x"]).groupby("bin").apply(apply_groupby, window_size=window_size, names=names).unstack()
 
+        print(polyfit.isel(x=0, y=0).compute(scheduler="single-threaded"))
+        return
+        task = polyfit.to_netcdf("polyfit_test.nc", compute=False)
+        with TqdmCallback():
+            #polyfit.compute()
+            task.compute()
+        return
+
+        #polyfit = stacked.groupby("bin").apply(apply_groupby).unstack()
+        polyfits = xr.DataArray(np.zeros((len(names), location.y.shape[0], location.x.shape[0])) + np.nan, coords=[("coef", names), location.y, location.x])
+
+        for h_bin, group in tqdm(location.stack(stacked_y_x=["y", "x"]).groupby("bin"), total=h_bins.size):
+
+            polyfit = apply_groupby(group, window_size=window_size, names=names).compute(scheduler="processes").unstack()
+            polyfits.loc[{"x": polyfit.x, "y": polyfit.y}] = xr.where(polyfit.notnull(), polyfit, polyfits.loc[{"x": polyfit.x, "y": polyfit.y}])
+
+            
+        task = polyfits.to_netcdf("polyfit_test.nc", compute=False)
+        with TqdmCallback():
+            #polyfit.compute()
+            task.compute()
+
+        
+        return
+
+        #location_df: dd.DataFrame = location.to_dask_dataframe()
+
+        return
+
+
+        task = polyfit.to_netcdf("polyfit_test.nc", compute=False)
+        with TqdmCallback(), warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            #polyfit.compute()
+            task.compute()
+            
+
+
+
+        return
+        location["polyfit"] = location.groupby("bins").map(apply_groupby)
+
+        with warnings.catch_warnings():
+            # warnings.filterwarnings("ignore", message=".*All-NaN.*")
+            warnings.simplefilter("ignore", RuntimeWarning)
+            with TqdmCallback():
+                location["polyfit"] = location["polyfit"].compute()
+
+        location["polyfit"].isel(coef=0).plot(vmin=-0.1, vmax=0.1)
+        plt.show()
+
+
+        return
+
+        for h_bin, subset in location.groupby("bins", restore_coord_dims=True, squeeze=False):
+
+            if h_bin < 10:
+                continue
 
             with warnings.catch_warnings():
-                warnings.filterwarnings("ignore", "R^2 score is not well-defined")
-                warnings.simplefilter("ignore")
-                model = sklearn.pipeline.make_pipeline(
-                    sklearn.preprocessing.PolynomialFeatures(degree=degree),
-                    sklearn.linear_model.RANSACRegressor(min_samples=2, max_trials=100, random_state=1),
-                )
-                model.fit(
-                    points["t"].values.reshape((-1, 1)),
-                    points["ad_elevation"],
-                    ransacregressor__sample_weight=points["weight"].values,
-                )
-                estimator = model.steps[-1][1].estimator_
-                return xr.DataArray(
-                    np.r_[estimator.coef_[1:][::-1], [estimator.intercept_]].reshape((1, 1, -1)),
-                    coords=[("y", [midpoint.y]), ("x", [midpoint.x]), ("coef", names)],
-                    name="fit",
+                # warnings.filterwarnings("ignore", message=".*All-NaN.*")
+                warnings.simplefilter("ignore", RuntimeWarning)
+                rolled = (
+                    subset["ad_elevation"]
+                    .unstack()
+                    .rolling(x=20, y=20, center=True, min_periods=1)
+                    .median(["y", "x"])
+                    .stack(stacked_y_x=["y", "x"])
                 )
 
-            plt.scatter(points["time"], points["ad_elevation"], c=points["weight"])
-            plt.plot(points["time"].values, model.predict(points["time"].values.reshape((-1, 1))))
+                rolled = rolled.where(subset["ad_elevation_med_temp"].notnull())
+
+                retval = xr.DataArray(da.apply_along_axis(ransac_fit, axis=0, arr=rolled, time=location["t"].values, degree=degree), coords=[("coef", names), rolled["stacked_y_x"]]).compute()
+
+            print(retval.dropna("stacked_y_x").isel(stacked_y_x=0))
+
+            retval.unstack().isel(coef=0).plot()
             plt.show()
 
-            return height
+            return
 
-        def block_fit_window(array: xr.Dataset, xmin, xmax, ymin, ymax, step):
-
-            xstep_min = (step - 1) if ((array.x.min() != xmin) and array.x.shape[0] > (step - 2)) else 0
-            xstep_max = (array.x.shape[0] + 1 - step) if (array.x.max() != xmax) else array.x.shape[0]
-
-            ystep_min = (step - 1) if ((array.y.max() != ymax) and array.y.shape[0] > (step - 2)) else 0
-            ystep_max = (array.y.shape[0] + 1 - step) if (array.y.min() != ymin) else array.y.shape[0]
-            x_mids = np.arange(xstep_min, xstep_max)
-            y_mids = np.arange(ystep_min, ystep_max)
-
-            assert x_mids.shape[0] > 0
-            assert y_mids.shape[0] > 0
-            if False:
-                print(array["ad_elevation_med_temp"].shape, f"{xstep_min=}, {xstep_max=}, {ystep_min=}, {ystep_max=} {x_mids.shape=}, {y_mids.shape=}") 
-
-                template = xr.DataArray(
-                    np.zeros((array.y.shape[0], array.x.shape[0], len(names))),
-                    coords=[array.y, array.x, ("coef", names)],
-                    name="fit",
-                )
-                return template
-            vals = []
-            for x_mid in x_mids:
-                x_coord = array.x.values[x_mid]
-                for y_mid in y_mids:
-                    y_coord = array.y.values[y_mid]
-                    vals.append(
-                        fit_window(
-                            array.isel(
-                                x=slice(max(x_mid - step, 0), min(x_mid + step, array.x.shape[0])),
-                                y=slice(max(y_mid - step, 0), min(y_mid + step, array.y.shape[0])),
-                            ),
-                            y_coord=y_coord,
-                            x_coord=x_coord,
-                        )
+            retval = xr.apply_ufunc(
+                ransac_fit,
+                rolled.transpose("stacked_y_x", "time"),
+                input_core_dims=[
+                    (
+                        "time",
+                        "stacked_y_x",
                     )
-            # for i in range(1, x_offs):
-            #     for j in range(1, y_offs):
-            #         vals.append(fit_window(array.isel(x=slice(x_offs[i -1], x_offs[i]), y=slice(y_offs[i], y_offs[i - 1]))))
-            #print("Hello")
-            
-            array["fit"] = xr.combine_by_coords(vals)["fit"]
-            #print(array)
-
-            # vals = xr.merge([array, xr.combine_by_coords(vals)], compat="override")
-
-            return array["fit"]
-
-        def map_blocks(array: xr.Dataset, patch_size: int = 30, side_looking: int = 30):
-
-            chunking = {k: (side_looking * 2 + patch_size - 2) for k in ["x", "y"]}
-
-            template = xr.DataArray(
-                np.empty((location.y.shape[0], location.x.shape[0], len(names))),
-                coords=[location.y, location.x, ("coef", names)],
-                name="fit",
-            ).chunk(chunking)
-
-            return location.chunk(chunking).map_blocks(
-                block_fit_window,
-                template=template,
-                kwargs=dict(xmin=array.x.min(), xmax=array.x.max(), ymin=array.y.min(), ymax=array.y.max(), step=side_looking),
+                ],
+                output_core_dims=[("time", "stacked_y_x")],
+                exclude_dims=set(["time"]),
+                dask="allowed",
+                kwargs=dict(time=location["t"].values, degree=degree),
             )
+
+            print(retval)
+
+            plt.show()
+            return
+
+        return
+
+        for i in range(1, h_bins.size):
+            subset = location.where(
+                (location["ad_elevation_med_temp"] < h_bins[1]) & (location["ad_elevation_med_temp"] >= h_bins[0])
+            )
+
+            elevs = subset["ad_elevation"].rolling(x=30, y=30, center=True).median(["x", "y"])
+
+            with TqdmCallback():
+                elevs.compute(scheduler="processes")
+
+            elevs.median("time").plot()
+            plt.show()
+
+            return
+
+        return
+
+    if True:
+
+        max_distance = 40
 
         stack["ad_elevation_med_temp"] = stack["ad_elevation"].median("time")
         stack["t"] = stack["time"] - 2021
         location = stack.sel(**poi_slices["accumulation_prob"])
 
-        #location = location.isel(x=slice(0, chunking["x"]), y=slice(0, chunking["y"])).chunk(chunking)
+        chunking = {"x": 2, "y": 2}
 
-        # location = location.assign_coords({"coef": names})
-        # location["fit"] = ("y", "x", "coef"), np.empty((location.y.shape[0], location.x.shape[0], len(names)))
-
-        chunking={"x": 1, "y": 1}
-
-        # ds.rolling(x=2, y=2).construct(x="kx", y="ky").stack(kxkytime=["kx", "ky", "time"]).set_index(kxkytime="time").rename(kxkytime="time").reset_coords(drop=True)
-        #location = location.isel(x=slice(0, 60), y=slice(0, 60))
         window_size = int(np.ceil(max_distance / res[0]))
+        if window_size % 2 == 0:
+            window_size += 1
+
+        warnings.simplefilter("error")
+
+        times = da.array(location.t.values).repeat(window_size**2)
+
+        # retval = location["ad_elevation"].rolling(x=window_size, y=window_size, center=True, min_periods=1).reduce(apply, res=res, max_distance=max_distance, time=times, degree=degree).isel(time=list(range(degree)) + [-1])#.isel(time=slice(-(degree + 1), location.time.shape[0]))
+        rolled = (
+            location["ad_elevation"]
+            .rolling(x=window_size, y=window_size, center=True)
+            .construct(y="ry", x="rx")
+        ).chunk(**chunking, rx=window_size, ry=window_size)
+
+        template = xr.DataArray(np.zeros((len(names), location.y.shape[0], location.x.shape[0])), coords=[("coef", names), location.y, location.x]).chunk(chunking)
+
+        polyfit = xr.map_blocks(block_polyfit, rolled, kwargs=dict(times=times.compute(), res=res, max_distance=max_distance, names=names), template=template)
+        polyfit.name = "polyfit"
+
+
+        task = polyfit.to_netcdf("polyfit_test.nc", compute=False)
+        with TqdmCallback(smoothing=0.1):
+            task.compute()
+
+        polyfit = xr.open_dataset("polyfit_test.nc")
+
+        polyfit["polyfit"].isel(coef=0).plot()
+        plt.show()
+        
+
+        return
+        
+        template = xr.apply_ufunc(
+                        apply_ransac_fit,
+                        rolled,
+                        input_core_dims=[
+                            (
+                                "time",
+                                "y",
+                                "x",
+                                "ry",
+                                "rx",
+                            )
+                        ],
+                        output_core_dims=[("time", "y", "x")],
+                        exclude_dims=set(["rx", "ry", "time"]),
+                        dask="allowed",
+                        kwargs=dict(res=res, max_distance=max_distance, time=times, degree=degree),
+        )
+
+        print(template)
+        print(rolled)
+        return
+
+        import dask
+        with dask.config.set(**{'array.slicing.split_large_chunks': False}):
+            polyfit = xr.apply_ufunc(
+                apply_ransac_fit,
+                rolled,
+                input_core_dims=[
+                    (
+                        "time",
+                        "y",
+                        "x",
+                        "ry",
+                        "rx",
+                    )
+                ],
+                output_core_dims=[("time", "y", "x")],
+                exclude_dims=set(["rx", "ry", "time"]),
+                dask="allowed",
+                kwargs=dict(res=res, max_distance=max_distance, time=times, degree=degree),
+            ).rename(time="coef").assign_coords(coef=names)
+
+
+
+        #print(rolled.isel(time=0, x=20, y=20).compute())
+
+        return
+        
+
+        retvals = []
+        for coord, subset in tqdm(rolled.groupby("x", squeeze=False), total=rolled.x.shape[0]):
+            retval = xr.apply_ufunc(
+                apply_ransac_fit,
+                subset,
+                input_core_dims=[
+                    (
+                        "time",
+                        "y",
+                        "x",
+                        "ry",
+                        "rx",
+                    )
+                ],
+                output_core_dims=[("time", "y", "x")],
+                exclude_dims=set(["rx", "ry", "time"]),
+                dask="allowed",
+                kwargs=dict(res=res, max_distance=max_distance, time=times, degree=degree),
+            )
+
+            retvals.append(retval.compute(scheduler="processes"))
+
+        retval = xr.combine_nested(retvals, "x")
+        retval.to_netcdf("nested_test.nc")
+
+        return
+        # for rolled in location["ad_elevation"].rolling(x=window_size, y=window_size, center=True, min_periods=1).construct(y="ry", x="rx"):
+        #    print(rolled)
+        #    return
+
+        with TqdmCallback():
+            retval = retval.compute(scheduler="synchronous")
+
+        print(retval)
+
+        return
+        retval.isel(time=0).plot()
+        plt.show()
+
+        print(retval)
+
+        return
+        rolling = location
+        rolling["ad_elevation"] = (
+            location["ad_elevation"].rolling(x=window_size, y=window_size, center=True).construct(x="rx", y="ry")
+        )
+
+        window_mid = window_size // 2
+        rolling["mid_elevation"] = rolling["ad_elevation"].isel(rx=window_mid, ry=window_mid).median("time")
+
+        distance = np.sqrt(
+            np.sum(np.square(np.meshgrid(*([(np.arange(window_size) - window_mid) * res[0]] * 2))), axis=0)
+        )
+
+        rolling["close_points"] = ("ry", "rx"), distance < (max_distance / 2)
+        rolling["close_elevation"] = (
+            xr.apply_ufunc(
+                np.abs,
+                rolling["ad_elevation"].isel(rx=window_mid, ry=window_mid).median("time") - rolling["mid_elevation"],
+                dask="allowed",
+            )
+            < 1
+        )
+
+        chunksize = 64
+
+        y_chunks = np.r_[np.arange(0, rolling.y.shape[0], step=chunksize), [rolling.y.shape[0]]]
+        x_chunks = np.r_[np.arange(0, rolling.x.shape[0], step=chunksize), [rolling.x.shape[0]]]
+
+        import dask.array
+
+        with tqdm(total=y_chunks.size * x_chunks.size) as progress_bar:
+            for i in range(1, y_chunks.size):
+                for j in range(1, x_chunks.size):
+                    subset = rolling.isel(
+                        y=slice(y_chunks[i - 1], y_chunks[i] + 1), x=slice(x_chunks[i - 1], x_chunks[i] + 1)
+                    )
+
+                    subset["ad_elevation"] = subset["ad_elevation"].where(
+                        subset["close_points"] & subset["close_elevation"]
+                    )
+                    elev = (
+                        subset.stack(stacked=["time", "rx", "ry"])
+                        .set_index(stacked="t")
+                        .rename(stacked="t")["ad_elevation"]
+                        .reset_coords(drop=True)
+                    )
+
+                    result = dask.array.apply_along_axis(hello, axis=2, arr=elev, time=elev["t"].values, degree=degree)
+                    arr = result.compute()
+
+                    progress_bar.update()
+                    continue
+
+                    plt.imshow(arr[:, :, 1], vmin=-1, vmax=1, cmap="RdBu")
+                    plt.show()
+
+                return
+
+        print(rolling)
+
+        return
+
+        rolling["close_points"] = (
+            rolling["close_points"].broadcast_like(rolling["ad_elevation"]).chunk(x=400, y=400, time=54, rx=81, ry=81)
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir).joinpath("rolling.nc")
+            temp_path = Path("rolling.nc")
+
+            task = rolling.to_netcdf(
+                temp_path, compute=False, encoding={v: {"zlib": True, "complevel": 3} for v in rolling.data_vars}
+            )
+
+            with TqdmCallback():
+                task.compute()
+
+            rolling = xr.open_dataset(temp_path)
+
+        print(rolling)
+
+        rolling["ad_elevation"] = (
+            rolling["ad_elevation"]
+            .stack(rxrytime=["rx", "ry", "time"])
+            .set_index(rxrytime="time")
+            .rename(rxrytime="time")
+        )
+
+        return
+
+        rolling["ad_elevation"] = rolling["ad_elevation"].where(rolling["close_points"])
+
+        # rolling["close_elevation"] = rolling["ad_elevation_med_temp"] - rolling["ad_elevation"]
+
+        return
 
         template = xr.DataArray(
             np.empty((location.y.shape[0], location.x.shape[0], len(names))),
             coords=[location.y, location.x, ("coef", names)],
             name="fit",
         ).chunk(chunking)
-        rolling = location.chunk(chunking).rolling(x=window_size, y=window_size, center=True, min_periods=1).construct(x="rx", y="ry").chunk(chunking)
 
-        mapped = xr.map_blocks(fit_window_rolling, rolling, kwargs=dict(names=names, max_distance=max_distance, resolution=res[0]), template=template)
+        rolling = (
+            location.chunk(chunking)
+            .rolling(x=window_size, y=window_size, center=True, min_periods=1)
+            .construct(x="rx", y="ry")
+            .chunk(chunking)
+        )
+
+        mapped = xr.map_blocks(
+            fit_window_rolling,
+            rolling,
+            kwargs=dict(names=names, max_distance=max_distance, resolution=res[0]),
+            template=template,
+        )
         with TqdmCallback(desc="Fitting curves", smoothing=0.1):
             mapped.compute()
 
         print("Saving")
 
         mapped.to_netcdf("test_map_blocks.nc")
-        
-        return
-
-        #location["fit"] = map_blocks(location)
-        #with TqdmCallback():
-        #    location.compute(scheduler="processes")
-
-        # vals = block_fit_window(location.compute())
-
-        plt.imshow(location["fit"].isel(coef=-1).values)
-        plt.show()
-        return
-
-        # x_vals = location["x"].isel(x=np.arange(30, location["x"].shape[0], 60))
-        # y_vals = location["y"].isel(y=np.arange(30, location["y"].shape[0], 60))
-
-        with dask.config.set(**{"array.slicing.split_large_chunks": True}):
-
-            # vals = location.chunk(x=256, y=256).rolling(x=30, y=30).construct(x="kx", y="ky").stack(xy=["x", "y"]).set_index(xy="x").reset_coords(drop=True).chunk(xy=256).to_dask_dataframe()
-            # with tqdm() as progress_bar:
-            #    vals = location.chunk(x=15, y=15).rolling(x=30, y=30, center=True).construct(x="kx", y="ky").stack(xy=["x", "y"]).groupby("xy").apply(fit_window, progress_bar=progress_bar)
-
-            vals = location.map_blocks(block_fit_window, template=location["ad_elevation_med_temp"])
-            with TqdmCallback():
-                vals.compute(scheduler="processes")
-
-            print(vals)
-
-            return
-
-            vals = (
-                stack["ad_elevation"]
-                .chunk(x=256, y=256)
-                .rolling(x=30, y=30, center=True)
-                .construct(x="kx", y="ky")
-                .stack(xy=["x", "y"])
-                .chunk(xy=100)
-                .reduce(apply, dim=["kx", "ky", "time"], times=stack["time"].values, chunksize=30)
-            )
-
-            print(vals.__dask_scheduler__)
-
-            vals = xr.DataArray(
-                vals.values.reshape((location.y.shape[0], location.x.shape[0], 4)),
-            )
-            print(vals)
-            return
-            print(
-                vals.assign_coords(
-                    xy=pd.MultiIndex.from_arrays(
-                        [vals.x.values, vals.y.values, np.repeat(np.arange(4), int(vals.y.values.shape[0] / 4))]
-                    )
-                )
-            )
-            # vals.coords["coef"] = np.repeat(np.arange(4), int(vals.shape[0] / 4))
-
-        return
-
-        with dask.config.set(**{"array.slicing.split_large_chunks": False}):
-            print(
-                xr.apply_ufunc(
-                    apply,
-                    location["ad_elevation"]
-                    .chunk(x=30, y=30)
-                    .rolling(x=30, y=30)
-                    .construct(x="kx", y="ky")
-                    .stack(xy=["x", "y"]),
-                    input_core_dims=[["xy"]],
-                    output_core_dims=[["xy"]],
-                    kwargs={"times": location["time"].values, "chunksize": 30},
-                    dask="allowed",
-                )
-            )
-
-        # fit_window(location.to_dask_dataframe().compute(), height=location["y"].shape[0], width=location["x"].shape[0], n_times=location["time"].shape[0])
-
-        # location = location.where(~location["ad_elevation"].isnull().any("time"), drop=True)
-
-        # location["ad_elevation"].median("time").plot()
-        # plt.show()
-        # print(location.map_blocks(fit_window, template=location))
-
-        return
-
-    if False:
-        stack = stack.sel(**pois["terminus_b"], method="nearest")
-
-        stack["elev_filtered"] = block_median(stack)
-
-        # point = stack.isel(x=0, y=0)
-        point = stack
-
-        plt.scatter(point["time"], point["ad_elevation"])
-        plt.scatter(point["time"], point["elev_filtered"])
-        plt.show()
-
-        print(stack)
-
-        return
-
-    if False:
-        with rio.open("temp/stable_terrain.tif") as raster:
-            window = rio.windows.from_bounds(*poi.bounds, transform=raster.transform)
-            data = raster.read(1, window=window, masked=True, boundless=True).filled(0)
-
-        stack["stable_terrain"] = xr.DataArray(data, coords=xr_coords)
-
-        median_elevation = stack["ad_elevation"].median("time")
-
-        diffs = (stack["ad_elevation"] - median_elevation).where(stack["stable_terrain"] == 1).median(["x", "y"])
-        stack["ad_elevation"] = stack["ad_elevation"] - diffs
-
-        plt.scatter(diffs["time"], diffs.values)
-
-        plt.show()
-
-        return
-
-    def fit_trend(array: xr.DataArray):
-        xs = array["t"].values
-
-        model = sklearn.pipeline.make_pipeline(
-            sklearn.preprocessing.PolynomialFeatures(degree=degree),
-            sklearn.linear_model.RANSACRegressor(min_samples=2, max_trials=100, random_state=1),
-        )
-
-        # estimator = model.steps[-1][1].estimator_
-        def polyfit(y_vals, progress_bar: tqdm | None = None):
-            if progress_bar is not None:
-                progress_bar.update()
-            mask = np.isfinite(y_vals + xs)
-            if np.count_nonzero(mask) < 3:
-                return [np.nan] * (degree + 1)
-
-            with warnings.catch_warnings():
-                warnings.filterwarnings("ignore", "R^2 score is not well-defined")
-                model.fit(xs[mask].reshape((-1, 1)), y_vals[mask])
-
-            estimator = model.steps[-1][1].estimator_
-            return np.r_[estimator.coef_[1:][::-1], [estimator.intercept_]]
-            return [estimator.coef_[2], estimator.coef_[1], estimator.intercept_]
-
-        # with tqdm(total=np.multiply(*stack["ad_elevation"].shape[1:]), disable=True) as progress_bar:
-        coefs = np.apply_along_axis(
-            polyfit,
-            axis=1,
-            arr=array["ad_elevation"].values.reshape(array["t"].shape + (-1,)).T,
-        ).reshape(array["ad_elevation"].shape[1:] + (degree + 1,))
-
-        for i, coef in enumerate(names):
-            array[coef] = xr.DataArray(coefs[:, :, i], coords=[array.y, array.x])
-
-        return array  # xr.Dataset(output)
-
-    if not poly_path.is_file():
-        width = 1000
-        xmin = 551090
-        ymax = 8658163
-
-        if False:
-            xmin = 550250.90
-            ymax = 8657357.22
-
-        x_slice = slice(xmin, xmin + width)
-        y_slice = slice(ymax, ymax - width)
-        # stack = stack.sel(x=x_slice, y=y_slice).dropna("time", how="all")
-
-        stack["t"] = stack["time"] - int(stack["time"].min()) + 8 / 12
-        chunksize = 20
-
-        for coef in names:
-            stack[coef] = xr.DataArray(np.zeros(stack["ad_elevation"].shape[1:]), coords=[stack.y, stack.x])
-        stack = stack.chunk(x=chunksize, y=chunksize)
-
-        # n_chunks = int(np.ceil(stackk["x"].shape[0] / chunksize + stack["y"].shape[0] / chunksize))
-
-        stack = stack.map_blocks(fit_trend, template=stack)
-        # stack = fit_trend(stack)
-
-        with TqdmCallback(smoothing=0.1, desc="Fitting polynomials"):
-            stack = stack.compute(scheduler="processes")
-
-        stack.to_netcdf(
-            poly_path, encoding={key: {"zlib": True, "complevel": 9} for key in stack.data_vars}, engine="h5netcdf"
-        )
-    else:
-        stack = xr.open_dataset(poly_path)
-
-    plt.figure(figsize=(8, 8))
-    for i, name in enumerate(pois, start=1):
-        plt.subplot(2, int(np.ceil(len(pois) / 2)), i)
-        plt.title(name)
-        point = stack.sel(**pois[name], method="nearest").dropna("time", how="any")
-        # plt.plot(point["time"], point["elev_est"], label="Estimated")
-        plt.scatter(point["time"], point["ad_elevation"], label="Measured")
-    plt.show()
-    return
-    # times = np.linspace(point.t.min(), point.t.max())
-
-    # print(stack["poly_bias"].values.shape)
-    # print(np.moveaxis(np.repeat(stack["poly_bias"].values, 11).reshape(stack["poly_bias"].shape + (11,)), 2, 0).shape)
-
-    def estimate(array, times: xr.DataArray | None = None):
-        if times is None:
-            times = array["t"]
-            out_times = array["time"]
-        else:
-            out_times = times
-
-        out = np.moveaxis(
-            np.repeat(array["poly_bias"].values, times.shape[0]).reshape(array["poly_bias"].shape + (times.shape[0],)),
-            2,
-            0,
-        )
-        times_arr = np.repeat(times.values, np.prod(out.shape[1:])).reshape(out.shape)
-        for i, coef in enumerate(names[:-1]):
-            arr = np.moveaxis(
-                np.repeat(array[coef].values, times.shape[0]).reshape(out.shape[1:] + (times.shape[0],)),
-                2,
-                0,
-            )
-            out += arr * times_arr ** (degree - i)
-        return xr.DataArray(out, coords=[out_times, array.y, array.x])
-
-    def derivative(array, times: xr.DataArray | None = None, level: int = 1):
-        if times is None:
-            times = array["t"]
-            out_times = array["time"]
-        else:
-            out_times = times
-
-        # out = np.moveaxis(
-        #    np.repeat(array["poly_bias"].values, times.shape[0]).reshape(array["poly_bias"].shape + (times.shape[0],)),
-        #    2,
-        #    0,
-        # )
-        out = np.zeros((times.shape[0],) + array["poly_bias"].shape)
-        times_arr = np.repeat(times.values, np.prod(out.shape[1:])).reshape(out.shape)
-        for i, coef in enumerate(names[:-level]):
-            arr = np.moveaxis(
-                np.repeat(array[coef].values, times.shape[0]).reshape(out.shape[1:] + (times.shape[0],)),
-                2,
-                0,
-            )
-            new_exponent = degree - i - level
-            factor = np.prod([range(new_exponent + 1, degree - i + 1)])
-            out += factor * arr * (times_arr**new_exponent if new_exponent != 0 else 1)
-
-            # print(f"{coef}: {factor} * val * x ^ {new_exponent}")
-
-        return xr.DataArray(out, coords=[out_times, array.y, array.x])
-
-        # return xr.DataArray(est, coords=array["ad_elevation"].coords)
-
-    if not stack_corr_path.is_file():
-
-        for coef in names[:-1]:
-            stack[coef].values = skimage.filters.median(stack[coef].values, skimage.morphology.disk(4))
-
-        stack["elev_est"] = estimate(stack)
-        stack["elev_err"] = xr.apply_ufunc(np.abs, stack["ad_elevation"] - stack["elev_est"]).median("time")
-        # plt.subplot(131)
-        # stack["elev_err"].plot(vmin=0, vmax=10, cmap="Reds")
-        stack["poly_bias"] += (stack["ad_elevation"] - stack["elev_est"]).median("time")
-
-        stack["elev_est"] = estimate(stack)
-        stack["elev_err"] = xr.apply_ufunc(np.abs, stack["ad_elevation"] - stack["elev_est"]).median("time")
-        stack.to_netcdf(
-            stack_corr_path,
-            encoding={key: {"zlib": True, "complevel": 9} for key in stack.data_vars},
-            engine="h5netcdf",
-        )
-    else:
-        stack = xr.open_dataset(stack_corr_path)
-
-    # stack["poly_a"].plot()
-    # plt.show()
-
-    for coef in names:
-        continue
-        plt.figure(figsize=(8, 5))
-        plt.title(coef)
-        stack[coef].plot()
-        plt.savefig(f"tinkarp/coefs/{coef}.jpg", dpi=300)
-
-
-    times = xr.DataArray(np.linspace(3 - (8 / 12), 10, 50))
-    yearly = estimate(stack, times=times).rename({"dim_0": "time"})
-    dhdt = derivative(stack, times=times, level=1).rename({"dim_0": "time"})
-    dhdt2 = derivative(stack, times=times, level=2).rename({"dim_0": "time"})
-
-    for arr in [yearly, dhdt, dhdt2]:
-        arr["time"] = arr["time"] + stack["time"].min()
-
-    plt.close()
-    plt.figure(figsize=(12, 5))
-    anim_dir = nc_path.parent.joinpath("anim/")
-    anim_dir.mkdir(exist_ok=True, parents=True)
-    for year in yearly["time"].values:
-        data = yearly.sel(time=year)
-        hill = xdem.terrain.hillshade(data.values, resolution=5)
-        plt.suptitle(f"{year:.2f}")
-        plt.subplot(131)
-        plt.imshow(hill, cmap="Greys_r", vmin=0, vmax=255)
-        plt.axis("off")
-        plt.subplot(132)
-        plt.title("dH/dt (m/a)")
-        plt.imshow(dhdt.sel(time=year).values, vmin=-4, vmax=4, cmap="RdBu")
-        plt.colorbar(aspect=10, fraction=0.05)
-        plt.axis("off")
-        # dhdt.sel(time=year).plot(vmin=-4, vmax=4, cmap="RdBu", aspect="equal", size=5)
-        plt.subplot(133)
-        plt.title("dH/dt² (m/a²)")
-        plt.imshow(dhdt2.sel(time=year).values, vmin=-2, vmax=2, cmap="PuOr")
-        plt.colorbar(aspect=10, fraction=0.05)
-        plt.axis("off")
-        plt.tight_layout()
-        plt.savefig(anim_dir.joinpath(f"{glacier}_{year:.2f}.jpg"), dpi=600)
 
 
 def main():
