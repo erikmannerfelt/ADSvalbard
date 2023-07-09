@@ -3,3 +3,4 @@ temp/
 data/
 ADSvalbard.qgs~
 failures.csv
+.env

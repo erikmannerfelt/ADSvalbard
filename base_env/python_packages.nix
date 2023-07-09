@@ -212,7 +212,74 @@ let
           xarray
         ];
       };
+
+      pdal = super.buildPythonPackage rec {
+        pname = "pdal";
+        version = "3.2.3";
+
+        src = pkgs.fetchFromGitHub {
+          owner="PDAL";
+          repo="python";
+          rev=version;
+          sha256="s1eExST/s8RW8i+aQDQGIVaGhZCWJ17xZXAf4xLgl50=";
+
+        };
+        nativeBuildInputs = [
+          pkgs.cmake
+          pkgs.pdal
+
+        ];
+        buildInputs = with super; [
+          scikit-build
+          pybind11
+          pkgs.cmake
+          pkgs.ninja
+        ];
+
+        propagatedBuildInputs = with super; [
+          pkgs.pdal
+          numpy
+        ];
+        preBuild = "cd ..";
+        setuptoolsCheckPhase = "true";
+      };
+
+    simpervisor = super.buildPythonPackage rec {
+      pname= "simpervisor";
+      version = "0.4";
+
+      src = super.fetchPypi {
+        inherit pname version;
+        sha256 = "zseeE829btsEpcmMH/jUvZcT5wbAaSJpCaHvDonTk8U=";
+      };
+      setuptoolsCheckPhase = "true";
+
     };
+    jupyter-server-proxy = super.buildPythonPackage rec  {
+
+        pname = "jupyter-server-proxy";
+        version = "3.2.2";
+        src = super.fetchPypi {
+          inherit pname version;
+          sha256 = "VGkOqUZwNdGHyTDFmedgZQF7rxbhGObuuuDToAjE2UY=";
+        };
+        setuptoolsCheckPhase = "true";
+        buildInputs = with super; [
+          jupyter-packaging
+
+
+        ];
+
+        propagatedBuildInputs = with super; [
+          aiohttp
+          jupyter-server
+          self.simpervisor
+        ];
+
+
+    };
+    };
+
   };
 
 

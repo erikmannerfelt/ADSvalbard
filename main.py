@@ -33,6 +33,7 @@ import sklearn.pipeline
 from tqdm.dask import TqdmCallback
 import skimage
 import dask
+import dask.distributed
 import dask.dataframe as dd
 import dask.array as da
 
@@ -1136,65 +1137,6 @@ def process_all(show_progress_bar: bool = True):
                 progress_bar.update()
 
 
-def fit_window_rolling(array: xr.Dataset, resolution: float, max_distance: float, names: list[str]):
-
-    array = array.isel(x=0, y=0)
-    rx_shape = array.ad_elevation.shape[1]
-    ry_shape = array.ad_elevation.shape[2]
-    mid_xi = (rx_shape // 2) - 1
-    mid_yi = (ry_shape // 2) - 1
-    midpoint = array.isel(rx=mid_xi, ry=mid_yi)
-
-    array["distance"] = ("rx", "ry"), np.sqrt(
-        np.sum(
-            np.square(
-                np.meshgrid((np.arange(ry_shape) - mid_yi) * resolution, (np.arange(rx_shape) - mid_xi) * resolution)
-            ),
-            axis=0,
-        )
-    )
-
-    array["close_points"] = (
-        xr.apply_ufunc(np.abs, (midpoint["ad_elevation_med_temp"] - array["ad_elevation_med_temp"])) < 1
-    )
-
-    points = (
-        array.where(array["close_points"] & (array["distance"] < max_distance))
-        .stack(rxrytime=["rx", "ry", "time"])
-        .dropna("rxrytime", how="all", subset=["ad_elevation"])
-        .set_index(rxrytime="time")
-        .rename(rxrytime="time")
-    )
-
-    if points["ad_elevation"].shape[0] == 0:
-        return xr.DataArray(
-            np.zeros((1, 1, len(names))) + np.nan,
-            coords=[("y", [midpoint.y]), ("x", [midpoint.x]), ("coef", names)],
-            name="fit",
-        )
-
-    points["weight"] = 1 / (1 + points["distance"] / points["distance"].max())
-
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", "R^2 score is not well-defined")
-        warnings.simplefilter("ignore")
-        model = sklearn.pipeline.make_pipeline(
-            sklearn.preprocessing.PolynomialFeatures(degree=len(names) - 1),
-            sklearn.linear_model.RANSACRegressor(min_samples=2, max_trials=100, random_state=1),
-        )
-        model.fit(
-            points["t"].values.reshape((-1, 1)),
-            points["ad_elevation"],
-            ransacregressor__sample_weight=points["weight"].values,
-        )
-        estimator = model.steps[-1][1].estimator_
-        return xr.DataArray(
-            np.r_[estimator.coef_[1:][::-1], [estimator.intercept_]].reshape((1, 1, -1)),
-            coords=[("y", [midpoint.y]), ("x", [midpoint.x]), ("coef", names)],
-            name="fit",
-        )
-
-
 def ransac_fit(heights: da.Array | np.ndarray, time: da.Array | np.ndarray, degree: int):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)
@@ -1283,101 +1225,36 @@ def apply_ransac_fit(arr: da.Array, time: da.Array, res: tuple[float, float], ma
 
     return result
 
-def weighted_quantiles(values, weights, quantiles=0.5):
-
-    i = values.argsort()
-    sorted_weights = weights[i]
-    sorted_values = values[i]
-    Sn = sorted_weights.cumsum()
-
-    return sorted_values[np.searchsorted(Sn, quantiles * Sn[-1])]
-
-def _better_median(arr: da.Array, weights, orig_shape):
-
-    finites = ~np.isfinite(arr)
-
-    arr = arr[finites]
-    if arr.size < 2:
-        return np.nan
-    weights = weights[finites]
-
-
-    return weighted_quantiles(arr, weights)
-
-    
-    if arr.size == 1 or np.isnan(arr).all():
-        return np.nan
-
-    return np.nanmedian(arr)
-
-def better_median(arr: da.Array, axis):
-
-    if axis != (3, 4):
-        raise ValueError
-
-    distance = (
-            da.sqrt(
-                da.sum(
-                    da.dstack(
-                        da.meshgrid(
-                            ((da.arange(arr.shape[-2]) - arr.shape[-2] // 2)) ** 2,
-                            ((da.arange(arr.shape[-1]) - arr.shape[-1] // 2)) ** 2,
-                        )
-                    ),
-                    axis=2,
-                )
-            )
-        )
-
-    weights = 1 / distance.ravel()
-
-    arr = arr.reshape(arr.shape[:-2] + (-1,))
-
-    return da.apply_along_axis(_better_median, -1, arr, weights=weights, orig_shape=arr.shape)
-   
-
-    #return np.nanmedian(arr, axis=-1)
-
-def apply_groupby(subset: xr.DataArray, window_size: int, names: list[str]):
-
-    
-    rolled = (
-        subset["ad_elevation"]
-        #.swap_dims({"bin": "stacked_y_x"})
-        .unstack()
-        .rolling(x=window_size, y=window_size, center=True, min_periods=1)
-        .reduce(better_median)
-        #.median(["y", "x"])
-        .stack(stacked_y_x=["y", "x"])
-    )
-    #print(rolled.isel(stacked_y_x=rolled.stacked_y_x.shape[0] // 2).compute())
-    rolled = rolled.where(subset["ad_elevation_med_temp"].notnull())#.swap_dims({"bin": "stacked_y_x"}).notnull())#.swap_dims({"stacked_y_x": "bin"})
-
-    #return rolled.reset_coords(drop=True)
-
-    return xr.DataArray(da.apply_along_axis(ransac_fit, axis=0, arr=rolled, time=subset["t"].values, degree=len(names) - 1), coords=[("coef", names), rolled["stacked_y_x"]])
 
 def block_polyfit(rolled: xr.DataArray, res, max_distance, times, names):
-    
-    return xr.apply_ufunc(
-        apply_ransac_fit,
-        rolled,
-        input_core_dims=[
-            (
-                "time",
-                "y",
-                "x",
-                "ry",
-                "rx",
-            )
-        ],
-        output_core_dims=[("time", "y", "x")],
-        exclude_dims=set(["rx", "ry", "time"]),
-        dask="allowed",
-        kwargs=dict(res=res, max_distance=max_distance, time=times, degree=len(names) - 1),
-    ).rename(time="coef").assign_coords(coef=names)
 
-def glacier_stack(glacier="tinkarp", force_redo: bool = False):
+    return (
+        xr.apply_ufunc(
+            apply_ransac_fit,
+            rolled,
+            input_core_dims=[
+                (
+                    "time",
+                    "y",
+                    "x",
+                    "ry",
+                    "rx",
+                )
+            ],
+            output_core_dims=[("time", "y", "x")],
+            exclude_dims=set(["rx", "ry", "time"]),
+            dask="allowed",
+            kwargs=dict(res=res, max_distance=max_distance, time=times, degree=len(names) - 1),
+        )
+        .rename(time="coef")
+        .assign_coords(coef=names)
+    )
+
+
+def glacier_stack(glacier="tinkarp", force_redo: bool = False, verbose: bool = True, client: dask.distributed.Client | None = None):
+
+    #if client is None:
+    #    client = dask.distributed.Client()
 
     temp_dir = get_temp_dir()
     glacier_stack_dir = temp_dir.joinpath(f"glacier_stacks/{glacier}")
@@ -1433,16 +1310,7 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False):
             arrays[i, :, :] = data
             times.append(year_dec)
 
-            # arrays.append(xr.DataArray(
-            #     data.reshape((1, height, width)),
-            #     coords=[("time", [year_dec])] + xr_coords,
-            #     name="ad_elevation"
-            # ))
-
             i += 1
-
-            # if np.std(times) > 2:
-            #    break
 
         stack = xr.Dataset({"ad_elevation": xr.DataArray(arrays[:i, :, :], coords=[("time", times)] + xr_coords)})
         stack = stack.sortby("time")
@@ -1479,7 +1347,7 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False):
     else:
         raise NotImplementedError()
 
-    width = 300
+    width = 400
     poi_slices = {
         k: {"x": slice(v["x"] - width / 2, v["x"] + width / 2), "y": slice(v["y"] + width / 2, v["y"] - width / 2)}
         for k, v in pois.items()
@@ -1487,415 +1355,93 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False):
     degree = 2
     names = ["poly_" + ("abcdefghijk"[i] if i != (degree) else "bias") for i in range(degree + 1)]
 
-    if False:
-        max_distance = 400
+    max_distance = 200
 
-        stack["ad_elevation_med_temp"] = stack["ad_elevation"].median("time")
-        stack["t"] = stack["time"] - 2021
-        location = stack.sel(**poi_slices["accumulation_prob"])
-        location["ad_elevation_med_temp"].compute(scheduler="processes")
+    # stack["ad_elevation_med_temp"] = stack["ad_elevation"].median("time")
+    stack["t"] = stack["time"] - 2021
+    #location = stack.sel(**poi_slices["accumulation_prob"])
+    location = stack
 
-        location["ad_elevation"] = location["ad_elevation"].astype("float16")
+    chunking = {"x": 10, "y": 10}
 
-        min_elev = float(location["ad_elevation_med_temp"].min())
-        max_elev = float(location["ad_elevation_med_temp"].max())
+    window_size = int(np.ceil(max_distance / res[0]))
+    if window_size % 2 == 0:
+        window_size += 1
 
-        step = 2
-        h_bins = np.arange(min_elev, max_elev + step, step)
+    warnings.simplefilter("error")
 
-        location["bin"] = ("y", "x"), np.digitize(location["ad_elevation_med_temp"], h_bins)
-        window_size = int(np.ceil(max_distance / res[0]))
-        if window_size % 2 == 0:
-            window_size += 1
+    times = da.array(location.t.values).repeat(window_size**2)
 
-        #print(stacked.assign_coords(bins=("stacked_y_x", stacked["bins"].data)))
-        #stacked = location.stack(stacked_y_x=["y", "x"]).swap_dims({"stacked_y_x": "bin"}).sortby("bin")
-        import dask
+    rolled = (location["ad_elevation"].rolling(x=window_size, y=window_size, center=True).construct(y="ry", x="rx")).chunk(**chunking, rx=window_size, ry=window_size).to_dataset()
 
-        with dask.config.set(**{"array.slicing.split_large_chunks": True}):
-            polyfit = location.stack(stacked_y_x=["y", "x"]).groupby("bin").apply(apply_groupby, window_size=window_size, names=names).unstack()
+    template = xr.DataArray(
+        np.zeros((len(names), location.y.shape[0], location.x.shape[0])),
+        coords=[("coef", names), location.y, location.x],
+    ).chunk(chunking)
+    import zarr
+    output_path = Path("./polyfit_test.nc")
+    #output_path = Path("./polyfit_test.zarr")
+    with tempfile.TemporaryDirectory() as temp_dir:
+        rolled_path = Path(temp_dir).joinpath("rolled.zarr")
 
-        print(polyfit.isel(x=0, y=0).compute(scheduler="single-threaded"))
-        return
-        task = polyfit.to_netcdf("polyfit_test.nc", compute=False)
-        with TqdmCallback():
-            #polyfit.compute()
-            task.compute()
-        return
-
-        #polyfit = stacked.groupby("bin").apply(apply_groupby).unstack()
-        polyfits = xr.DataArray(np.zeros((len(names), location.y.shape[0], location.x.shape[0])) + np.nan, coords=[("coef", names), location.y, location.x])
-
-        for h_bin, group in tqdm(location.stack(stacked_y_x=["y", "x"]).groupby("bin"), total=h_bins.size):
-
-            polyfit = apply_groupby(group, window_size=window_size, names=names).compute(scheduler="processes").unstack()
-            polyfits.loc[{"x": polyfit.x, "y": polyfit.y}] = xr.where(polyfit.notnull(), polyfit, polyfits.loc[{"x": polyfit.x, "y": polyfit.y}])
-
-            
-        task = polyfits.to_netcdf("polyfit_test.nc", compute=False)
-        with TqdmCallback():
-            #polyfit.compute()
-            task.compute()
-
+        compressor = zarr.Blosc(cname="zstd", clevel=3, shuffle=2)
         
-        return
+        if verbose:
+            print("Writing rolled to a temporary file")
+        task = rolled.to_zarr(rolled_path, encoding={v: {"compressor": compressor} for v in rolled.data_vars}, compute=True)
 
-        #location_df: dd.DataFrame = location.to_dask_dataframe()
+        #with TqdmCallback(desc="Writing rolled to a temporary file", smoothing=0.1):
+        #    task.compute()
 
-        return
+        if verbose:
+            print("Running polyfit")
 
-
-        task = polyfit.to_netcdf("polyfit_test.nc", compute=False)
-        with TqdmCallback(), warnings.catch_warnings():
-            warnings.simplefilter("ignore", RuntimeWarning)
-            #polyfit.compute()
-            task.compute()
-            
-
-
-
-        return
-        location["polyfit"] = location.groupby("bins").map(apply_groupby)
-
-        with warnings.catch_warnings():
-            # warnings.filterwarnings("ignore", message=".*All-NaN.*")
-            warnings.simplefilter("ignore", RuntimeWarning)
-            with TqdmCallback():
-                location["polyfit"] = location["polyfit"].compute()
-
-        location["polyfit"].isel(coef=0).plot(vmin=-0.1, vmax=0.1)
-        plt.show()
-
-
-        return
-
-        for h_bin, subset in location.groupby("bins", restore_coord_dims=True, squeeze=False):
-
-            if h_bin < 10:
-                continue
-
-            with warnings.catch_warnings():
-                # warnings.filterwarnings("ignore", message=".*All-NaN.*")
-                warnings.simplefilter("ignore", RuntimeWarning)
-                rolled = (
-                    subset["ad_elevation"]
-                    .unstack()
-                    .rolling(x=20, y=20, center=True, min_periods=1)
-                    .median(["y", "x"])
-                    .stack(stacked_y_x=["y", "x"])
-                )
-
-                rolled = rolled.where(subset["ad_elevation_med_temp"].notnull())
-
-                retval = xr.DataArray(da.apply_along_axis(ransac_fit, axis=0, arr=rolled, time=location["t"].values, degree=degree), coords=[("coef", names), rolled["stacked_y_x"]]).compute()
-
-            print(retval.dropna("stacked_y_x").isel(stacked_y_x=0))
-
-            retval.unstack().isel(coef=0).plot()
-            plt.show()
-
-            return
-
-            retval = xr.apply_ufunc(
-                ransac_fit,
-                rolled.transpose("stacked_y_x", "time"),
-                input_core_dims=[
-                    (
-                        "time",
-                        "stacked_y_x",
-                    )
-                ],
-                output_core_dims=[("time", "stacked_y_x")],
-                exclude_dims=set(["time"]),
-                dask="allowed",
-                kwargs=dict(time=location["t"].values, degree=degree),
-            )
-
-            print(retval)
-
-            plt.show()
-            return
-
-        return
-
-        for i in range(1, h_bins.size):
-            subset = location.where(
-                (location["ad_elevation_med_temp"] < h_bins[1]) & (location["ad_elevation_med_temp"] >= h_bins[0])
-            )
-
-            elevs = subset["ad_elevation"].rolling(x=30, y=30, center=True).median(["x", "y"])
-
-            with TqdmCallback():
-                elevs.compute(scheduler="processes")
-
-            elevs.median("time").plot()
-            plt.show()
-
-            return
-
-        return
-
-    if True:
-
-        max_distance = 40
-
-        stack["ad_elevation_med_temp"] = stack["ad_elevation"].median("time")
-        stack["t"] = stack["time"] - 2021
-        location = stack.sel(**poi_slices["accumulation_prob"])
-
-        chunking = {"x": 2, "y": 2}
-
-        window_size = int(np.ceil(max_distance / res[0]))
-        if window_size % 2 == 0:
-            window_size += 1
-
-        warnings.simplefilter("error")
-
-        times = da.array(location.t.values).repeat(window_size**2)
-
-        # retval = location["ad_elevation"].rolling(x=window_size, y=window_size, center=True, min_periods=1).reduce(apply, res=res, max_distance=max_distance, time=times, degree=degree).isel(time=list(range(degree)) + [-1])#.isel(time=slice(-(degree + 1), location.time.shape[0]))
-        rolled = (
-            location["ad_elevation"]
-            .rolling(x=window_size, y=window_size, center=True)
-            .construct(y="ry", x="rx")
-        ).chunk(**chunking, rx=window_size, ry=window_size)
-
-        template = xr.DataArray(np.zeros((len(names), location.y.shape[0], location.x.shape[0])), coords=[("coef", names), location.y, location.x]).chunk(chunking)
-
-        polyfit = xr.map_blocks(block_polyfit, rolled, kwargs=dict(times=times.compute(), res=res, max_distance=max_distance, names=names), template=template)
-        polyfit.name = "polyfit"
-
-
-        task = polyfit.to_netcdf("polyfit_test.nc", compute=False)
-        with TqdmCallback(smoothing=0.1):
-            task.compute()
-
-        polyfit = xr.open_dataset("polyfit_test.nc")
-
-        polyfit["polyfit"].isel(coef=0).plot()
-        plt.show()
-        
-
-        return
-        
-        template = xr.apply_ufunc(
-                        apply_ransac_fit,
-                        rolled,
-                        input_core_dims=[
-                            (
-                                "time",
-                                "y",
-                                "x",
-                                "ry",
-                                "rx",
-                            )
-                        ],
-                        output_core_dims=[("time", "y", "x")],
-                        exclude_dims=set(["rx", "ry", "time"]),
-                        dask="allowed",
-                        kwargs=dict(res=res, max_distance=max_distance, time=times, degree=degree),
-        )
-
-        print(template)
-        print(rolled)
-        return
-
-        import dask
-        with dask.config.set(**{'array.slicing.split_large_chunks': False}):
-            polyfit = xr.apply_ufunc(
-                apply_ransac_fit,
+        with xr.open_zarr(rolled_path)["ad_elevation"] as rolled:
+            polyfit = xr.map_blocks(
+                block_polyfit,
                 rolled,
-                input_core_dims=[
-                    (
-                        "time",
-                        "y",
-                        "x",
-                        "ry",
-                        "rx",
-                    )
-                ],
-                output_core_dims=[("time", "y", "x")],
-                exclude_dims=set(["rx", "ry", "time"]),
-                dask="allowed",
-                kwargs=dict(res=res, max_distance=max_distance, time=times, degree=degree),
-            ).rename(time="coef").assign_coords(coef=names)
+                kwargs=dict(times=times.compute(), res=res, max_distance=max_distance, names=names),
+                template=template,
+            ).to_dataset(name="polyfit")
+            polyfit["coef"] = polyfit["coef"].astype(str)
 
 
+            # if output_path.is_dir():
+            #     shutil.rmtree(output_path)
 
-        #print(rolled.isel(time=0, x=20, y=20).compute())
 
-        return
-        
+            # with TqdmCallback():
+            #     polyfit = polyfit.compute(scheduler="processes")
 
-        retvals = []
-        for coord, subset in tqdm(rolled.groupby("x", squeeze=False), total=rolled.x.shape[0]):
-            retval = xr.apply_ufunc(
-                apply_ransac_fit,
-                subset,
-                input_core_dims=[
-                    (
-                        "time",
-                        "y",
-                        "x",
-                        "ry",
-                        "rx",
-                    )
-                ],
-                output_core_dims=[("time", "y", "x")],
-                exclude_dims=set(["rx", "ry", "time"]),
-                dask="allowed",
-                kwargs=dict(res=res, max_distance=max_distance, time=times, degree=degree),
-            )
+            # task = polyfit.chunk(x=256, y=256, coef=3).to_zarr(output_path, compute=False)
 
-            retvals.append(retval.compute(scheduler="processes"))
+            # with TqdmCallback():
+            #     task.compute()
+            # return
 
-        retval = xr.combine_nested(retvals, "x")
-        retval.to_netcdf("nested_test.nc")
+            #TODO: There's a huge bottleneck here. scheduler="processes" is much much faster, but netcdf cannot be written concurrently
+            # A much better alternative would be to write to a zarr, but that errors out for some weird reason.
 
-        return
-        # for rolled in location["ad_elevation"].rolling(x=window_size, y=window_size, center=True, min_periods=1).construct(y="ry", x="rx"):
-        #    print(rolled)
-        #    return
-
-        with TqdmCallback():
-            retval = retval.compute(scheduler="synchronous")
-
-        print(retval)
-
-        return
-        retval.isel(time=0).plot()
-        plt.show()
-
-        print(retval)
-
-        return
-        rolling = location
-        rolling["ad_elevation"] = (
-            location["ad_elevation"].rolling(x=window_size, y=window_size, center=True).construct(x="rx", y="ry")
-        )
-
-        window_mid = window_size // 2
-        rolling["mid_elevation"] = rolling["ad_elevation"].isel(rx=window_mid, ry=window_mid).median("time")
-
-        distance = np.sqrt(
-            np.sum(np.square(np.meshgrid(*([(np.arange(window_size) - window_mid) * res[0]] * 2))), axis=0)
-        )
-
-        rolling["close_points"] = ("ry", "rx"), distance < (max_distance / 2)
-        rolling["close_elevation"] = (
-            xr.apply_ufunc(
-                np.abs,
-                rolling["ad_elevation"].isel(rx=window_mid, ry=window_mid).median("time") - rolling["mid_elevation"],
-                dask="allowed",
-            )
-            < 1
-        )
-
-        chunksize = 64
-
-        y_chunks = np.r_[np.arange(0, rolling.y.shape[0], step=chunksize), [rolling.y.shape[0]]]
-        x_chunks = np.r_[np.arange(0, rolling.x.shape[0], step=chunksize), [rolling.x.shape[0]]]
-
-        import dask.array
-
-        with tqdm(total=y_chunks.size * x_chunks.size) as progress_bar:
-            for i in range(1, y_chunks.size):
-                for j in range(1, x_chunks.size):
-                    subset = rolling.isel(
-                        y=slice(y_chunks[i - 1], y_chunks[i] + 1), x=slice(x_chunks[i - 1], x_chunks[i] + 1)
-                    )
-
-                    subset["ad_elevation"] = subset["ad_elevation"].where(
-                        subset["close_points"] & subset["close_elevation"]
-                    )
-                    elev = (
-                        subset.stack(stacked=["time", "rx", "ry"])
-                        .set_index(stacked="t")
-                        .rename(stacked="t")["ad_elevation"]
-                        .reset_coords(drop=True)
-                    )
-
-                    result = dask.array.apply_along_axis(hello, axis=2, arr=elev, time=elev["t"].values, degree=degree)
-                    arr = result.compute()
-
-                    progress_bar.update()
-                    continue
-
-                    plt.imshow(arr[:, :, 1], vmin=-1, vmax=1, cmap="RdBu")
-                    plt.show()
-
-                return
-
-        print(rolling)
-
-        return
-
-        rolling["close_points"] = (
-            rolling["close_points"].broadcast_like(rolling["ad_elevation"]).chunk(x=400, y=400, time=54, rx=81, ry=81)
-        )
-        with tempfile.TemporaryDirectory() as temp_dir:
-            temp_path = Path(temp_dir).joinpath("rolling.nc")
-            temp_path = Path("rolling.nc")
-
-            task = rolling.to_netcdf(
-                temp_path, compute=False, encoding={v: {"zlib": True, "complevel": 3} for v in rolling.data_vars}
-            )
-
+            print("Processing")
+            task = polyfit.to_netcdf(output_path, compute=False)# encoding={v: {"compressor": compressor} for v in polyfit.data_vars}, compute=False)
             with TqdmCallback():
                 task.compute()
 
-            rolling = xr.open_dataset(temp_path)
 
-        print(rolling)
+    polyfit = xr.open_dataset(output_path)
 
-        rolling["ad_elevation"] = (
-            rolling["ad_elevation"]
-            .stack(rxrytime=["rx", "ry", "time"])
-            .set_index(rxrytime="time")
-            .rename(rxrytime="time")
-        )
-
-        return
-
-        rolling["ad_elevation"] = rolling["ad_elevation"].where(rolling["close_points"])
-
-        # rolling["close_elevation"] = rolling["ad_elevation_med_temp"] - rolling["ad_elevation"]
-
-        return
-
-        template = xr.DataArray(
-            np.empty((location.y.shape[0], location.x.shape[0], len(names))),
-            coords=[location.y, location.x, ("coef", names)],
-            name="fit",
-        ).chunk(chunking)
-
-        rolling = (
-            location.chunk(chunking)
-            .rolling(x=window_size, y=window_size, center=True, min_periods=1)
-            .construct(x="rx", y="ry")
-            .chunk(chunking)
-        )
-
-        mapped = xr.map_blocks(
-            fit_window_rolling,
-            rolling,
-            kwargs=dict(names=names, max_distance=max_distance, resolution=res[0]),
-            template=template,
-        )
-        with TqdmCallback(desc="Fitting curves", smoothing=0.1):
-            mapped.compute()
-
-        print("Saving")
-
-        mapped.to_netcdf("test_map_blocks.nc")
+    polyfit["polyfit"].isel(coef=0).plot()
+    plt.show()
 
 
-def main():
-    process_all()
+def main(client):
+    process_all(client=client)
     # glacier_stack()
 
     # median_stack()
 
 
 if __name__ == "__main__":
-    main()
+    #client = dask.distributed.Client("127.0.0.1:8786")
+    glacier_stack("dronbreen", client=None)
+    #main(client=client)
