@@ -1,29 +1,30 @@
 {
   inputs = {
     nixpkgs.url = "nixpkgs/nixos-unstable";
-    base_env.url = "path:./base_env";
-    base_env.inputs.nixpkgs.follows = "nixpkgs";
-    base_env.inputs.flake-utils.follows = "flake-utils";
-    flake-utils.url = "github:numtide/flake-utils";
+    nixrik.url = "gitlab:erikmannerfelt/nixrik";
+    nixrik.inputs.nixpkgs.follows = "nixpkgs";
   };
 
-  outputs = { self, nixpkgs, flake-utils, base_env, ... }:
-    flake-utils.lib.eachDefaultSystem (system:
+  outputs = { self, nixpkgs, nixrik }:
+    nixrik.lib.eachDefaultSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
-        packages = base_env.packages.${system};
 
-        updated_packages = pkgs.lib.filterAttrs (k: v: (k != "python_from_requirements") && (k != "python_packages")) (
-          pkgs.lib.attrsets.recursiveUpdate packages {
-            python=(packages.python_from_requirements ./requirements.txt);
-          }
-        );
+        my-python = (nixrik.packages.${system}.python_from_requirements {python_packages=pkgs.python310Packages;}) ./requirements.txt;
+        packages = pkgs.lib.attrsets.recursiveUpdate (builtins.listToAttrs (map (pkg: { name = pkg.pname; value = pkg; }) (with pkgs; [
+            pre-commit
+            zsh
+            graphviz
+          ]))) {
+            python=my-python;
+          };
+
       in
       {
-        packages = updated_packages;
+        inherit packages;
         devShell = pkgs.mkShell {
             name = "ADSvalbard";
-            buildInputs = pkgs.lib.attrValues updated_packages;
+            buildInputs = pkgs.lib.attrValues packages;
             shellHook = ''
 
               zsh
