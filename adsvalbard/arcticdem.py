@@ -10,9 +10,10 @@ import adsvalbard.utilities
 import adsvalbard.inputs
 from typing import Any
 from pathlib import Path
+import datetime
 
 @adsvalbard.utilities.cache_json
-def get_all_geocells_metadata() -> dict[str, Any]:
+def get_all_geocells_metadata(cache_label = datetime.datetime.utcnow().strftime("%Y_%m")) -> dict[str, Any]:
     url = "https://pgc-opendata-dems.s3.us-west-2.amazonaws.com/arcticdem/strips/s2s041/2m.json"
 
     return adsvalbard.utilities.download_json(url=url)

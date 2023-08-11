@@ -5,6 +5,7 @@ from pathlib import Path
 class Constants(projectfiles.Constant):
     cache_dir = Path(__file__).parent.parent.joinpath(".cache")
     data_dir = Path(__file__).parent.parent.joinpath("data")
+    temp_dir = Path(__file__).parent.parent.joinpath("temp")
     res: float = 5.
     coreg_res: float = 50.
     crs_epsg: int = 32633

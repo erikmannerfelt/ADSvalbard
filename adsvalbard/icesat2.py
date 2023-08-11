@@ -7,6 +7,8 @@ import json
 import tempfile
 import rasterio as rio
 import pyproj
+import pandas as pd
+import geopandas as gpd
 
 # from tqdm import tqdm
 from tqdm.contrib.concurrent import process_map
@@ -15,6 +17,9 @@ from pqdm.processes import pqdm
 from bounded_pool_executor import BoundedProcessPoolExecutor
 import concurrent.futures
 import numpy as np
+
+import adsvalbard.utilities
+from adsvalbard.constants import CONSTANTS
 
 REGIONS = {"heer": {"xmin_lat": 16.61716, "ymax_lat": 78.00398, "xmax_lat": 18.42673, "ymin_lat": 77.58121}}
 
@@ -153,6 +158,38 @@ def grid_icesat():
             print(raster.descriptions)
             for i, name in enumerate(raster.descriptions, start=1):
                 print(name, raster.read(i).max())
+
+
+@adsvalbard.utilities.cache_nc
+def get_ic2_data(cache_label: str, bounds: rio.coords.BoundingBox, crs: rio.CRS | None = None):
+
+    if crs is None:
+        crs = rio.CRS.from_epsg(CONSTANTS.crs_epsg)
+
+
+    parts = []
+    for filename in ["snow_free_svalbard.csv", "snow_cover_svalbard.csv"]:
+        data = pd.read_csv(adsvalbard.utilities.get_data_dir("IC2").joinpath(filename))
+        data = gpd.GeoDataFrame(data, geometry=data["geometry"].apply(shapely.wkt.loads), crs=4326).to_crs(crs)
+        data["easting"] = data.geometry.x
+        data["northing"] = data.geometry.y
+        data["date"] = pd.to_datetime(data["date"].astype(str), format="%Y%m%d")
+
+        data["on_snow"] = int("free" not in filename) 
+
+        parts.append(data)
+
+    data = xr.Dataset.from_dataframe(pd.concat(parts).drop(columns=["geometry", "p_b"]))
+    
+
+    return data.chunk(index=512)
+
+    with xr.set_options(display_max_rows=100):
+        print(data)
+
+    
+    ...
+    
             
 
 

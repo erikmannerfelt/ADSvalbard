@@ -10,6 +10,7 @@ import requests
 import os
 import tempfile
 import shutil
+import xarray as xr
 
 from adsvalbard.constants import CONSTANTS
 
@@ -54,9 +55,19 @@ def load_feather(path: Path) -> gpd.GeoDataFrame:
 
 def cache_feather(func):
 
-    wrapped = projectfiles.cache(func, routine=(save_feather, load_feather, "feather")) 
+    wrapped = projectfiles.cache(func, routine=(save_feather, load_feather, "feather"), cache_dir=CONSTANTS.cache_dir) 
     return functools.update_wrapper(wrapped, func)
     return functools.wraps(wrapped, func)
+
+def save_nc(path: Path, obj: xr.Dataset):
+    obj.to_netcdf(path, encoding={v: {"zlib": True, "complevel": 5} for v in obj.data_vars})
+
+def load_nc(path: Path) -> xr.Dataset:
+    return xr.open_dataset(path, chunks="auto")
+
+def cache_nc(func):
+    wrapped = projectfiles.cache(func, routine=(save_nc, load_nc, "nc"), cache_dir=CONSTANTS.cache_dir)
+    return functools.update_wrapper(wrapped, func)
 
 # cache_feather = functools.partial(projectfiles.cache, routine=(save_feather, load_feather, "feather"), cache_dir=CONSTANTS.cache_dir)
 # cache_feather.__doc__ = projectfiles.cache.__doc__
@@ -138,7 +149,7 @@ def download_json(url: str) -> dict[str, Any]:
 
 def get_data_dir(label: str) -> Path:
     data_base_dir = CONSTANTS.data_dir
-    if label in ["ArcticDEM"]:
+    if label in ["ArcticDEM", "IC2"]:
         subdir = label
     else:
         raise ValueError(f"Unknown data dir label: {label}")
