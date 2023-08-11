@@ -27,7 +27,6 @@
             buildInputs = pkgs.lib.attrValues packages;
             shellHook = ''
 
-              zsh
             '';
           };
       }

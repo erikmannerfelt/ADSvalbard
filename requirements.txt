@@ -19,3 +19,5 @@ h5py
 pdal
 dask-gateway-server
 jupyter-server-proxy
+projectfiles
+variete
