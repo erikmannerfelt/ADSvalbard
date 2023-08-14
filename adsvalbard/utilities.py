@@ -63,7 +63,7 @@ def save_nc(path: Path, obj: xr.Dataset):
     obj.to_netcdf(path, encoding={v: {"zlib": True, "complevel": 5} for v in obj.data_vars})
 
 def load_nc(path: Path) -> xr.Dataset:
-    return xr.open_dataset(path, chunks="auto")
+    return xr.open_dataset(path, chunks=512)
 
 def cache_nc(func):
     wrapped = projectfiles.cache(func, routine=(save_nc, load_nc, "nc"), cache_dir=CONSTANTS.cache_dir)
@@ -188,4 +188,10 @@ def download_large_file(url: str, filename: str | None = None, directory: Path |
 
     
     
+def shape_from_bounds_res(bounds: rio.coords.BoundingBox, res: float) -> tuple[int, int]:
+    return int((bounds.top - bounds.bottom) / res[0]), int((bounds.right- bounds.left) / res[1])
+
+
+def res_from_bounds_shape(bounds: rio.coords.BoundingBox, shape: tuple[int, int]) -> tuple[float, float]:
+    return (bounds.top - bounds.bottom) / shape[0], (bounds.right - bounds.left) / shape[1]
     

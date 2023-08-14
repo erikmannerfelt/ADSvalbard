@@ -11,6 +11,12 @@ import adsvalbard.inputs
 from typing import Any
 from pathlib import Path
 import datetime
+import xarray as xr
+import variete
+from adsvalbard.constants import CONSTANTS
+import tempfile
+import lxml.etree as ET
+import projectfiles
 
 @adsvalbard.utilities.cache_json
 def get_all_geocells_metadata(cache_label = datetime.datetime.utcnow().strftime("%Y_%m")) -> dict[str, Any]:
@@ -101,9 +107,63 @@ def get_strips(cache_label: str = "nordenskiold") -> gpd.GeoDataFrame:
 def download_arcticdem(dem_data: pd.Series) -> tuple[Path, Path]:
     data_dir = adsvalbard.utilities.get_data_dir("ArcticDEM")
 
+    data_dir.mkdir(exist_ok=True, parents=True)
+
     filepaths = []
     for kind in ["dem", "matchtag"]:
         filepath = adsvalbard.utilities.download_large_file(dem_data[kind], directory=data_dir)
         filepaths.append(filepath)
 
     return filepaths[0], filepaths[1]
+
+
+def make_warped_vrt(dem_path: Path, res: float = CONSTANTS.res, crs: rio.CRS | None = None, bounds: rio.coords.BoundingBox | None = None) -> Path:
+
+    checksum = projectfiles.get_checksum([res, bounds, CONSTANTS.crs_epsg])
+
+    output_path = CONSTANTS.cache_dir.joinpath("warped_vrts").joinpath(f"{dem_path.stem}-{checksum}.vrt")
+    output_path.parent.mkdir(exist_ok=True, parents=True)
+
+    kwargs = {}
+    if crs is not None:
+        kwargs["dst_crs"] = crs
+    else:
+        kwargs["dst_crs"] = rio.CRS.from_epsg(CONSTANTS.crs_epsg)
+        
+    if bounds is not None:
+        dst_shape = adsvalbard.utilities.shape_from_bounds_res(bounds=bounds, res=[res] * 2)
+        dst_transform = rio.transform.from_bounds(*bounds, *dst_shape[::-1])
+
+        kwargs.update(dict(
+            dst_shape=dst_shape,
+            dst_transform=dst_transform,
+        ))
+    else:
+        kwargs.update(dict(
+            dst_res=res,
+        ))
+
+    variete.vrt.vrt.vrt_warp(
+        output_path,
+        dem_path,
+        **kwargs
+    )
+
+    return output_path
+
+
+def get_warped_masked_vrt(dem_path: Path, mask_path: Path, res: float = CONSTANTS.res, crs_epsg: int = CONSTANTS.crs_epsg) -> variete.VRaster:
+    dst_crs = rio.CRS.from_epsg(crs_epsg)
+
+    bounds = adsvalbard.utilities.align_bounds(variete.load(dem_path).warp(crs=dst_crs, res=res).bounds, res=[res] * 2)
+
+    dem_warped_path = make_warped_vrt(dem_path= dem_path, res=res, bounds=bounds, crs=dst_crs)
+    mask_warped_path = make_warped_vrt(dem_path=mask_path, res=res, bounds=bounds, crs=dst_crs)
+
+    dem = variete.load(dem_warped_path, nodata_to_nan=False)
+    mask = variete.load(mask_warped_path, nodata_to_nan=True)
+
+    dem_masked = dem * mask
+
+    return dem_masked
+    

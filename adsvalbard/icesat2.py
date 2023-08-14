@@ -161,7 +161,7 @@ def grid_icesat():
 
 
 @adsvalbard.utilities.cache_nc
-def get_ic2_data(cache_label: str, bounds: rio.coords.BoundingBox, crs: rio.CRS | None = None):
+def get_is2_data(cache_label: str, bounds: rio.coords.BoundingBox, crs: rio.CRS | None = None):
 
     if crs is None:
         crs = rio.CRS.from_epsg(CONSTANTS.crs_epsg)
@@ -174,6 +174,13 @@ def get_ic2_data(cache_label: str, bounds: rio.coords.BoundingBox, crs: rio.CRS 
         data["easting"] = data.geometry.x
         data["northing"] = data.geometry.y
         data["date"] = pd.to_datetime(data["date"].astype(str), format="%Y%m%d")
+
+        data = data[
+            (data["easting"] <= bounds.right) &
+            (data["easting"] >= bounds.left) &
+            (data["northing"] >= bounds.bottom) &
+            (data["northing"] <= bounds.top)
+        ]
 
         data["on_snow"] = int("free" not in filename) 
 
