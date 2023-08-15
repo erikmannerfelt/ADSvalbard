@@ -11,6 +11,7 @@ import os
 import tempfile
 import shutil
 import xarray as xr
+import pandas as pd
 
 from adsvalbard.constants import CONSTANTS
 
@@ -51,13 +52,16 @@ def save_feather(path: Path, obj: gpd.GeoDataFrame):
     obj.to_feather(path)
 
 def load_feather(path: Path) -> gpd.GeoDataFrame:
-    return gpd.read_feather(path)
+    try:
+        return gpd.read_feather(path)
+    except ValueError:
+        return pd.read_feather(path)
 
-def cache_feather(func):
+def cache_feather(func, cache_dir=CONSTANTS.cache_dir, **kwargs):
 
-    wrapped = projectfiles.cache(func, routine=(save_feather, load_feather, "feather"), cache_dir=CONSTANTS.cache_dir) 
+    wrapped = projectfiles.cache(func, routine=(save_feather, load_feather, "feather"), cache_dir=cache_dir, **kwargs) 
     return functools.update_wrapper(wrapped, func)
-    return functools.wraps(wrapped, func)
+
 
 def save_nc(path: Path, obj: xr.Dataset):
     obj.to_netcdf(path, encoding={v: {"zlib": True, "complevel": 5} for v in obj.data_vars})

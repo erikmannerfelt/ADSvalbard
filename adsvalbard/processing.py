@@ -27,26 +27,34 @@ def get_previous_failures() -> pd.DataFrame:
 def coregister_is2(dem: VRaster, dem_data: pd.Series, is2_data: xr.Dataset):
 
 
-    is2_subset = is2_data.where(
-        (is2_data["easting"] <= dem.bounds.right) &
-        (is2_data["easting"] >= dem.bounds.left) & 
-        (is2_data["northing"] >= dem.bounds.bottom) &
-        (is2_data["northing"] <= dem.bounds.top),
-        drop=True, 
-    )
-    is2_subset["date"].load()
-    is2_subset["on_snow"].load()
-    close_in_time = np.abs(is2_subset["date"] - pd.to_datetime(dem_data["datetime"]).to_datetime64()) < pd.Timedelta(days=30 * 6) 
-    is2_subset = is2_subset.where(close_in_time | (is2_subset["on_snow"] == 0), drop=True)
+    is2 = adsvalbard.icesat2.filter_is2_data(bounds=dem.bounds, dem_data=dem_data, is2_data=is2_data, _cache_label=dem_data["title"]).rename(columns={"h_te_best_fit": "z", "easting": "E", "northing": "N"})
 
-    is2 = is2_subset[["easting", "northing", "h_te_best_fit"]].to_pandas()
 
-    print(is2)
+    coreg = xdem.coreg.GradientDescending() + xdem.coreg.DirectionalBias()
+
+    dem_in_memory = xdem.DEM.from_array(dem.read(1), transform=dem.transform, crs=dem.crs, nodata=-9999.)
+
+    is2 = is2[dem_in_memory.value_at_coords(is2["E"], is2["N"]) != -9999.]
+
+    import matplotlib.pyplot as plt
+    plt.imshow(dem_in_memory.data, extent=[dem.bounds.left, dem.bounds.right, dem.bounds.bottom, dem.bounds.top])
+    plt.scatter(is2["E"], is2["N"])
+    plt.show()
+
+    coreg.fit_pts(is2, dem_in_memory, mask_high_curv=False)
+
+    dem_coreg = coreg.apply(dem_in_memory)
+
+    is2["dem_elev"] = dem_coreg.value_at_coords(is2["E"], is2["N"])
+
+    is2["dh"] = is2["dem_elev"] - is2["z"]
+
+    plt.scatter(is2["E"], is2["N"], c=is2["dh"], vmin=-20, vmax=20, cmap="RdBu")
+    plt.colorbar()
+    plt.show()
+
+
     
-
-
-    raise NotImplementedError()
-
 
 def process_strip(strip: pd.Series, is2_data: xr.Dataset, progress_bar: tqdm | None = None):
 
@@ -61,9 +69,6 @@ def process_strip(strip: pd.Series, is2_data: xr.Dataset, progress_bar: tqdm | N
     if progress_bar is not None:
         progress_bar.set_description("Co-registering to IS2")
 
-    # The filtering stage will take forever if these are not in memory
-    is2_data["easting"].load()
-    is2_data["northing"].load()
     coregister_is2(dem, dem_data=strip, is2_data=is2_data)
 
 

@@ -9,6 +9,8 @@ import rasterio as rio
 import pyproj
 import pandas as pd
 import geopandas as gpd
+import functools
+from variete import VRaster
 
 # from tqdm import tqdm
 from tqdm.contrib.concurrent import process_map
@@ -195,9 +197,28 @@ def get_is2_data(cache_label: str, bounds: rio.coords.BoundingBox, crs: rio.CRS 
         print(data)
 
     
-    ...
     
-            
+@functools.partial(adsvalbard.utilities.cache_feather, cache_dir=CONSTANTS.cache_dir.joinpath("is2_data"))
+def filter_is2_data(bounds: rio.coords.BoundingBox, dem_data: pd.Series, is2_data: xr.Dataset, _cache_label: str | None = None, keep_columns: list[str] = ["easting", "northing", "h_te_best_fit"]) -> pd.DataFrame:
+
+    
+    # The filtering stage will take forever if these are not in memory
+    is2_data["easting"].load()
+    is2_data["northing"].load()
+    is2_subset = is2_data.where(
+        (is2_data["easting"] <= bounds.right) &
+        (is2_data["easting"] >= bounds.left) & 
+        (is2_data["northing"] >= bounds.bottom) &
+        (is2_data["northing"] <= bounds.top),
+        drop=True, 
+    )
+    is2_subset["date"].load()
+    is2_subset["on_snow"].load()
+    close_in_time = np.abs(is2_subset["date"] - pd.to_datetime(dem_data["datetime"]).to_datetime64()) < pd.Timedelta(days=30 * 6) 
+    is2_subset = is2_subset.where(close_in_time | (is2_subset["on_snow"] == 0), drop=True)
+
+    return is2_subset[keep_columns].to_pandas().reset_index()
+           
 
 
 def icesat_main():

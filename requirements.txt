@@ -21,3 +21,4 @@ dask-gateway-server
 jupyter-server-proxy
 projectfiles
 variete
+noisyopt
