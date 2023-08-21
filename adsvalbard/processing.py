@@ -27,7 +27,7 @@ def get_previous_failures() -> pd.DataFrame:
 def coregister_is2(dem: VRaster, dem_data: pd.Series, is2_data: xr.Dataset):
 
 
-    is2 = adsvalbard.icesat2.filter_is2_data(bounds=dem.bounds, dem_data=dem_data, is2_data=is2_data, _cache_label=dem_data["title"]).rename(columns={"h_te_best_fit": "z", "easting": "E", "northing": "N"})
+    is2 = adsvalbard.icesat2.filter_is2_data(bounds=dem.bounds, dem_data=dem_data, is2_data=is2_data, cache_label=dem_data["title"]).rename(columns={"h_te_best_fit": "z", "easting": "E", "northing": "N"})
 
 
     coreg = xdem.coreg.GradientDescending() + xdem.coreg.DirectionalBias()
@@ -76,7 +76,7 @@ def process_strip(strip: pd.Series, is2_data: xr.Dataset, progress_bar: tqdm | N
 def process(region: str = "nordenskiold", progress_bar: bool = True):
 
     bounds = adsvalbard.utilities.get_bounds(region=region)
-    strips = adsvalbard.arcticdem.get_strips(cache_label=region)
+    strips = adsvalbard.arcticdem.get_strips(region_label=region)
 
     poi = shapely.geometry.box(*list(bounds))
     strips.sort_values("start_datetime", ascending=False, inplace=True)
@@ -85,7 +85,7 @@ def process(region: str = "nordenskiold", progress_bar: bool = True):
 
     strips = strips[~strips["title"].isin(failures["title"])]
 
-    is2_data = adsvalbard.icesat2.get_is2_data(cache_label=region, bounds=bounds)
+    is2_data = adsvalbard.icesat2.get_is2_data(region_label=region, bounds=bounds)
 
 
     for _, strip in strips.iterrows():

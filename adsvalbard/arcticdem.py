@@ -18,26 +18,25 @@ import tempfile
 import lxml.etree as ET
 import projectfiles
 
-@adsvalbard.utilities.cache_json
+@adsvalbard.utilities.cache_json(cache_label="cache_label")
 def get_all_geocells_metadata(cache_label = datetime.datetime.utcnow().strftime("%Y_%m")) -> dict[str, Any]:
     url = "https://pgc-opendata-dems.s3.us-west-2.amazonaws.com/arcticdem/strips/s2s041/2m.json"
 
     return adsvalbard.utilities.download_json(url=url)
 
 
-@adsvalbard.utilities.cache_json_subdir("geocell_meta")
+@adsvalbard.utilities.cache_json(subdir="geocell_meta")
 def get_geocell_metadata(url: str) -> dict[str, Any]:
     return adsvalbard.utilities.download_json(url=url)
 
 
-@adsvalbard.utilities.cache_json_subdir("strip_meta")
+@adsvalbard.utilities.cache_json(subdir="strip_meta")
 def get_strip_metadata(url: str) -> dict[str, Any]:
     return adsvalbard.utilities.download_json(url=url)
     
-@adsvalbard.utilities.cache_feather
-def get_strips(cache_label: str = "nordenskiold") -> gpd.GeoDataFrame:
-    region = cache_label
-    bounds = adsvalbard.utilities.get_bounds(region=region)
+@adsvalbard.utilities.cache_feather(cache_label="region_label")
+def get_strips(region_label: str = "nordenskiold") -> gpd.GeoDataFrame:
+    bounds = adsvalbard.utilities.get_bounds(region=region_label)
     crs = adsvalbard.utilities.get_crs()
 
     bounds_wgs = gpd.GeoSeries(shapely.geometry.box(*list(bounds)), crs=crs).to_crs(4326).total_bounds

@@ -15,6 +15,20 @@ import pandas as pd
 
 from adsvalbard.constants import CONSTANTS
 
+def precompile_cache(**kwargs):
+    """Precompile projectfiles.cache with the given kwargs (can be overridden)"""
+
+    if "cache_dir" not in kwargs:
+        kwargs["cache_dir"] = CONSTANTS.cache_dir
+
+    @functools.wraps(projectfiles.cache)
+    def decorator(func = None, subdir: Path | None = None, **kwargs2):
+        if subdir is not None:
+            kwargs["cache_dir"] = Path(kwargs["cache_dir"]).joinpath(subdir)
+        return projectfiles.cache(func=func, **(kwargs | kwargs2))
+
+    return decorator
+
 class NumpyArrayEncoder(json.JSONEncoder):
     """A JSON encoder that properly serializes numpy arrays."""
 
@@ -30,8 +44,7 @@ def load_geojson(path: Path) -> gpd.GeoDataFrame:
     return gpd.read_file(path) 
 
 
-cache_geojson = functools.partial(projectfiles.cache, routine=(save_geojson, load_geojson, "geojson"), cache_dir=CONSTANTS.cache_dir)
-cache_geojson.__doc__ = projectfiles.cache.__doc__
+cache_geojson = precompile_cache(cache_dir=CONSTANTS.cache_dir, routine=(save_geojson, load_geojson, "geojson"))
 
 
 def save_json(path: Path, obj: dict[Any, Any]):
@@ -43,10 +56,12 @@ def load_json(path: Path) -> dict[Any, Any]:
         return json.load(infile)
 
 
+#cache_json_subdir = precompile_cache(cache_dir=
+
+cache_json = precompile_cache(routine=(save_json, load_json, "json"))
+
 cache_json_subdir = lambda subdir: functools.partial(projectfiles.cache, routine=(save_json, load_json, "json"), cache_dir=CONSTANTS.cache_dir.joinpath(subdir))
 cache_json_subdir.__doc__ = projectfiles.cache.__doc__
-cache_json = functools.partial(projectfiles.cache, routine=(save_json, load_json, "json"), cache_dir=CONSTANTS.cache_dir)
-cache_json.__doc__ = projectfiles.cache.__doc__
 
 def save_feather(path: Path, obj: gpd.GeoDataFrame):
     obj.to_feather(path)
@@ -57,11 +72,7 @@ def load_feather(path: Path) -> gpd.GeoDataFrame:
     except ValueError:
         return pd.read_feather(path)
 
-def cache_feather(func, cache_dir=CONSTANTS.cache_dir, **kwargs):
-
-    wrapped = projectfiles.cache(func, routine=(save_feather, load_feather, "feather"), cache_dir=cache_dir, **kwargs) 
-    return functools.update_wrapper(wrapped, func)
-
+cache_feather = precompile_cache(routine=(save_feather, load_feather, "feather"))
 
 def save_nc(path: Path, obj: xr.Dataset):
     obj.to_netcdf(path, encoding={v: {"zlib": True, "complevel": 5} for v in obj.data_vars})
@@ -69,12 +80,8 @@ def save_nc(path: Path, obj: xr.Dataset):
 def load_nc(path: Path) -> xr.Dataset:
     return xr.open_dataset(path, chunks=512)
 
-def cache_nc(func):
-    wrapped = projectfiles.cache(func, routine=(save_nc, load_nc, "nc"), cache_dir=CONSTANTS.cache_dir)
-    return functools.update_wrapper(wrapped, func)
+cache_nc = precompile_cache(routine=(save_nc, load_nc, "nc"))
 
-# cache_feather = functools.partial(projectfiles.cache, routine=(save_feather, load_feather, "feather"), cache_dir=CONSTANTS.cache_dir)
-# cache_feather.__doc__ = projectfiles.cache.__doc__
 
 def align_bounds(
     bounds: rio.coords.BoundingBox | dict[str, float],
@@ -198,4 +205,42 @@ def shape_from_bounds_res(bounds: rio.coords.BoundingBox, res: float) -> tuple[i
 
 def res_from_bounds_shape(bounds: rio.coords.BoundingBox, shape: tuple[int, int]) -> tuple[float, float]:
     return (bounds.top - bounds.bottom) / shape[0], (bounds.right - bounds.left) / shape[1]
+
+
+def test_precompile_cache():
+
+    def func(arg1: int):
+        return str(arg1)
+
+    with tempfile.TemporaryDirectory() as temp_dir_str:
+        cache_dir = Path(temp_dir_str)
+
+        cached1 = projectfiles.cache(func, cache_dir=cache_dir)
+
+        cached1(1)
+        assert len(os.listdir(cache_dir)) == 1
+
+        precompiled = precompile_cache(cache_dir=cache_dir, routine="text")
+
+        cached2 = precompiled(func)
+
+        cached2(2)
+
+        assert len(os.listdir(cache_dir)) == 2
+
+        cached_files = os.listdir(cache_dir)
+
+        cache_name = list(filter(lambda p: ".txt" in p,  cached_files))[0]
+
+        with open(cache_dir.joinpath(cache_name)) as infile:
+            assert infile.read() == "2"
+
+
+
+        
+        
+
+        
+
+        
     

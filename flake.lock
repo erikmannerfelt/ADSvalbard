@@ -41,11 +41,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1692097548,
-        "narHash": "sha256-xWm4sJonnYZi5a19J+k/+2ZDQFepYBxmwb5+pWLmyB0=",
+        "lastModified": 1692625077,
+        "narHash": "sha256-8xTiUzy2u/70udz+DvEnAB7A7miv4ZBPHRVuSmOUdbM=",
         "owner": "erikmannerfelt",
         "repo": "nixrik",
-        "rev": "75ead57c88ba23c4a9fb14c9e5d96e44fd30c09e",
+        "rev": "a539a8afbb65ce4502594a06cc4137630010c441",
         "type": "gitlab"
       },
       "original": {
