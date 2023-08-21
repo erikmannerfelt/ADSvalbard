@@ -162,7 +162,7 @@ def grid_icesat():
                 print(name, raster.read(i).max())
 
 
-@adsvalbard.utilities.cache_nc(cache_label="region_label")
+@adsvalbard.caching.cache_nc(cache_label="region_label")
 def get_is2_data(region_label: str, bounds: rio.coords.BoundingBox, crs: rio.CRS | None = None):
 
     if crs is None:
@@ -198,7 +198,7 @@ def get_is2_data(region_label: str, bounds: rio.coords.BoundingBox, crs: rio.CRS
 
     
     
-@functools.partial(adsvalbard.utilities.cache_feather, cache_dir=CONSTANTS.cache_dir.joinpath("is2_data"), cache_label="cache_label")
+@functools.partial(adsvalbard.caching.cache_feather, cache_dir=CONSTANTS.cache_dir.joinpath("is2_data"), cache_label="cache_label")
 def filter_is2_data(bounds: rio.coords.BoundingBox, dem_data: pd.Series, is2_data: xr.Dataset, cache_label: str | None = None, keep_columns: list[str] = ["easting", "northing", "h_te_best_fit"]) -> pd.DataFrame:
 
     
