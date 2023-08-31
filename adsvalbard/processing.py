@@ -10,6 +10,9 @@ from variete import VRaster
 from pathlib import Path
 import xdem
 import numpy as np
+import matplotlib.pyplot as plt
+import scipy.optimize
+import scipy.spatial
 
 FAILURE_FILE = CONSTANTS.temp_dir.joinpath("failures.csv")
 
@@ -26,20 +29,34 @@ def get_previous_failures() -> pd.DataFrame:
 
 def coregister_is2(dem: VRaster, dem_data: pd.Series, is2_data: xr.Dataset):
 
+    coords= []
+    for geom in dem_data.geometry.geoms:
+
+        for i in range(100):
+            point = geom.exterior.interpolate(i / 100, normalized=True)
+            coords.append([point.x, point.y])
+
+        
+  
+    coords = np.array(coords)
+    coords -= np.mean(coords, axis=0)[None, :]
+
+    #mean_angle = np.deg2rad(np.atan(dem_data["pgc:avg_convergence_angle"]))
 
     is2 = adsvalbard.icesat2.filter_is2_data(bounds=dem.bounds, dem_data=dem_data, is2_data=is2_data, cache_label=dem_data["title"]).rename(columns={"h_te_best_fit": "z", "easting": "E", "northing": "N"})
 
 
-    coreg = xdem.coreg.GradientDescending() + xdem.coreg.DirectionalBias()
+    coreg = xdem.coreg.GradientDescending()
 
     dem_in_memory = xdem.DEM.from_array(dem.read(1), transform=dem.transform, crs=dem.crs, nodata=-9999.)
 
     is2 = is2[dem_in_memory.value_at_coords(is2["E"], is2["N"]) != -9999.]
 
-    import matplotlib.pyplot as plt
-    plt.imshow(dem_in_memory.data, extent=[dem.bounds.left, dem.bounds.right, dem.bounds.bottom, dem.bounds.top])
-    plt.scatter(is2["E"], is2["N"])
-    plt.show()
+    assert is2[["E", "N"]].notnull().all().all()
+
+    # plt.imshow(dem_in_memory.data, extent=[dem.bounds.left, dem.bounds.right, dem.bounds.bottom, dem.bounds.top])
+    # plt.scatter(is2["E"], is2["N"])
+    # plt.show()
 
     coreg.fit_pts(is2, dem_in_memory, mask_high_curv=False)
 
@@ -49,8 +66,22 @@ def coregister_is2(dem: VRaster, dem_data: pd.Series, is2_data: xr.Dataset):
 
     is2["dh"] = is2["dem_elev"] - is2["z"]
 
+    is2 = is2[is2["dh"] > -8000]
+
+    print(np.median(np.abs(is2["dh"])))
+
     plt.scatter(is2["E"], is2["N"], c=is2["dh"], vmin=-20, vmax=20, cmap="RdBu")
-    plt.colorbar()
+    plt.show()
+
+    
+
+    dependent = "z"
+
+    for i, data in is2.groupby((20 * (is2[dependent] - is2[dependent].min()) / (is2[dependent].max() - is2[dependent].min())).astype(int)):
+        plt.boxplot(data["dh"], positions=[i], widths=[1])
+        
+    #plt.scatter(is2["N"], is2["dh"])
+    #plt.colorbar()
     plt.show()
 
 

@@ -7,7 +7,7 @@ class Constants(projectfiles.Constant):
     data_dir = Path(__file__).parent.parent.joinpath("data")
     temp_dir = Path(__file__).parent.parent.joinpath("temp")
     res: float = 5.
-    coreg_res: float = 50.
+    coreg_res: float = 5.
     crs_epsg: int = 32633
 
     subregions: dict[list[float]] = {
