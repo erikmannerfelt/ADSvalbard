@@ -71,13 +71,32 @@ def get_data_urls():
             np_dem_base_url + url
             for url in [
                 "NP_S0_DTM5_2008_13652_33.zip",
-                "NP_S0_DTM5_2009_13824_33.zip",
+                "NP_S0_DTM5_2008_13657_35.zip",
+                "NP_S0_DTM5_2008_13659_33.zip",
+                "NP_S0_DTM5_2008_13660_33.zip",
+                "NP_S0_DTM5_2008_13666_35.zip",
+                "NP_S0_DTM5_2008_13667_35.zip",
                 "NP_S0_DTM5_2009_13822_33.zip",
+                "NP_S0_DTM5_2009_13824_33.zip",
+                "NP_S0_DTM5_2009_13827_35.zip",
+                "NP_S0_DTM5_2009_13833_33.zip",
                 "NP_S0_DTM5_2009_13835_33.zip",
-                "NP_S0_DTM5_2010_13923_33.zip",
+                "NP_S0_DTM5_2010_13826_33.zip",
+                "NP_S0_DTM5_2010_13828_33.zip",
+                "NP_S0_DTM5_2010_13832_35.zip",
                 "NP_S0_DTM5_2010_13836_33.zip",
+                "NP_S0_DTM5_2010_13918_33.zip",
+                "NP_S0_DTM5_2010_13920_35.zip",
+                "NP_S0_DTM5_2010_13922_33.zip",
+                "NP_S0_DTM5_2010_13923_33.zip",
+                "NP_S0_DTM5_2011_13831_35.zip",
+                "NP_S0_DTM5_2011_25160_33.zip",
+                "NP_S0_DTM5_2011_25161_33.zip",
                 "NP_S0_DTM5_2011_25162_33.zip",
+                "NP_S0_DTM5_2011_25163_33.zip",
                 "NP_S0_DTM5_2012_25235_33.zip",
+                "NP_S0_DTM5_2012_25236_35.zip",
+                "NP_S0_DTM5_2021_33.zip",
             ]
         ],
         "outlines": [
@@ -117,7 +136,13 @@ def get_strips() -> gpd.GeoDataFrame:
     crs = get_crs()
     bounds_wgs = gpd.GeoSeries(shapely.geometry.box(*list(bounds)), crs=get_crs()).to_crs(4326).total_bounds
 
-    filepath = [v[1] for v in get_data_urls()["strip_metadata"] if "geocell_metadata" in str(v[1])][0]
+    #meta_url, filepath = get_data_urls()["strip_metadata"][0])
+
+    meta_url, filepath = [v for v in get_data_urls()["strip_metadata"] if "geocell_metadata" in str(v[1])][0]
+
+    if not filepath.is_file():
+        filepath.parent.mkdir(exist_ok=True, parents=True)
+        download_file(meta_url, filepath)
 
     with open(filepath) as infile:
         data_json = json.load(infile)
@@ -278,7 +303,7 @@ def get_res() -> tuple[float, float]:
 def align_bounds(
     bounds: rio.coords.BoundingBox | dict[str, float],
     res: tuple[float, float] | None = None,
-    half_mod: bool = True,
+    half_mod: bool = False,
     buffer: float | None = None,
 ) -> rio.coords.BoundingBox:
     if isinstance(bounds, rio.coords.BoundingBox):
@@ -300,7 +325,7 @@ def align_bounds(
 
 
 def get_bounds(
-    region: str = "nordenskiold", res: tuple[float, float] | None = None, half_mod: bool = True
+    region: str = "heerland", res: tuple[float, float] | None = None, half_mod: bool = False
 ) -> rio.coords.BoundingBox:
     """
     Get the bounding coordinates of the output DEMs.
@@ -319,6 +344,7 @@ def get_bounds(
     region_bounds = {
         "svalbard": {"left": 341002.5, "bottom": 8455002.5, "right": 905002.5, "top": 8982002.5},
         "nordenskiold": {"left": 443002.5, "bottom": 8626007.5, "right": 560242.5, "top": 8703007.5},
+        "heerland": {"left": 537010, "bottom": 8602780, "right": 582940, "top": 8656400},
     }
 
     bounds = region_bounds[region]
@@ -508,6 +534,8 @@ def build_npi_mosaic(verbose: bool = False) -> tuple[Path, Path]:
     res = get_res()
     bounds = get_bounds(res=res)
 
+    bounds_epsg25833 = shapely.geometry.box(*gpd.GeoSeries([shapely.geometry.box(*bounds)], crs=32633).to_crs(25833).buffer(50).total_bounds)
+
     # Generate links to the DEM tiles within their zipfiles
     uris = []
     year_rasters = []
@@ -520,7 +548,14 @@ def build_npi_mosaic(verbose: bool = False) -> tuple[Path, Path]:
 
         uri = f"/vsizip/{filepath}/{filepath.stem}/{filepath.stem.replace('NP_', '')}.tif"
 
-        dem = xdem.DEM(uri)
+        dem = xdem.DEM(uri, load_data=False)
+
+        dem_bbox = shapely.geometry.box(*dem.bounds)
+        if not bounds_epsg25833.overlaps(dem_bbox):
+            continue
+
+        dem.crop(bounds_epsg25833.bounds)
+       
         year_raster = gu.Raster.from_array(
             (np.zeros(dem.shape, dtype="uint16") + year) * (1 - dem.data.mask.astype("uint16")),
             transform=dem.transform,
@@ -533,7 +568,7 @@ def build_npi_mosaic(verbose: bool = False) -> tuple[Path, Path]:
 
     if verbose:
         print("Merging rasters")
-    year_raster = gu.spatial_tools.merge_rasters(year_rasters, merge_algorithm=np.nanmax, resampling_method="nearest")
+    year_raster = gu.raster.merge_rasters(year_rasters, merge_algorithm=np.nanmax, resampling_method="nearest")
 
     year_raster.reproject(dst_bounds=bounds, dst_res=res, dst_crs=crs, resampling="nearest").save(
         output_year_path, tiled=True, compress="lzw"
@@ -697,7 +732,7 @@ def coregister(dem_path: Path, verbose: bool = True):
     if verbose:
         print(f"{now_time()}: Loaded and modified mask")
 
-    tba_dem = gu.Raster(str(dem_vrt_path))
+    tba_dem = gu.Raster(str(dem_vrt_path), load_data=True)
     tba_dem.set_mask(mask)
 
     if np.count_nonzero(np.isfinite(tba_dem.data.filled(np.nan))) == 0:
@@ -731,6 +766,7 @@ def coregister(dem_path: Path, verbose: bool = True):
         reference_dem=ref_dem.data,
         dem_to_be_aligned=tba_dem.data,
         transform=ref_dem.transform,
+        crs=tba_dem.crs,
         inlier_mask=stable_terrain_mask,
     )
     del stable_terrain_mask
@@ -799,6 +835,9 @@ def generate_difference(dem_path: Path, verbose: bool = False):
     dt_map.save(output_dt_path, co_opts=get_xdem_dem_co())
     dhdt_map.save(output_dhdt_path, co_opts=get_xdem_dem_co())
     dh_map.save(output_dh_path, co_opts=get_xdem_dem_co(), nodata=-9999)
+
+    if verbose:
+        print(f"{now_time()}: Saved dH/dt map")
 
     return output_dh_path, output_dhdt_path
 
@@ -881,6 +920,9 @@ def big_median_stack(years: int | list[int] | None = 2021, n_threads: int | None
         raise TypeError(f"{years=} has unknown type: {type(years)=}")
 
     output_path = dhdt_dir.joinpath(f"median_dhdt{ext}.tif")
+
+    if output_path.is_file():
+        return output_path
 
     res = get_res()
     shape = get_shape(res=res)
@@ -1001,6 +1043,8 @@ def big_median_stack(years: int | list[int] | None = 2021, n_threads: int | None
     ) as raster:
         raster.write(np.where(np.isfinite(stack), stack, -9999), 1)
 
+    return output_path
+
     # windows = np.ravel([[rio.windows.Window(col_off, row_off, min(shape[1] - col_off, block_size[0]), min(shape[0] - row_off, block_size[1])) for col_off in np.arange(0, shape[1], step=block_size[0])] for row_off in np.arange(0, shape[0], step=block_size[1])])
 
 
@@ -1074,8 +1118,11 @@ def process_all(show_progress_bar: bool = True):
     strips = get_strips()
 
     # All of Nordenskiöld Land
-    poi = shapely.geometry.box(*get_bounds())
+    poi = shapely.geometry.box(*get_bounds("heerland", half_mod=False))
 
+    # Build these first (or conversely, check that they exist)
+    build_npi_mosaic(verbose=(not show_progress_bar))
+    build_stable_terrain_mask(verbose=(not show_progress_bar))
     # Drønbreen
     # poi = shapely.geometry.box(538286, 8669555,544315,8675416)
     # Tinkarpbreen
@@ -1091,8 +1138,20 @@ def process_all(show_progress_bar: bool = True):
         failures = pd.read_csv(failures_file, names=["title", "exception"])
         strips = strips[~strips["title"].isin(failures["title"])]
 
+    strips["start_datetime"] = pd.to_datetime(strips["start_datetime"])
+
+    current_year = strips["start_datetime"].dt.year.max()
     with tqdm(total=strips.shape[0], disable=(not show_progress_bar)) as progress_bar:
         for _, dem_data in strips.iterrows():
+
+            if dem_data["start_datetime"].year != current_year:
+                if not show_progress_bar:
+                    print(f"{now_time()}: Finished {current_year}. Creating dHdt mosaic")
+                else:
+                    progress_bar.set_description(f"Finished {current_year}. Creating dHdt mosaic")
+                big_median_stack(years=current_year, verbose=(not show_progress_bar))
+
+                current_year = dem_data["start_datetime"].year
 
             start_time = time.time()
             progress_bar.set_description(f"Working on {dem_data['title']}")
@@ -1106,6 +1165,8 @@ def process_all(show_progress_bar: bool = True):
                     with open(failures_file, "a+") as outfile:
                         outfile.write(dem_data["title"] + ',"Empty AssertionError; probably xdem"\n')
                     progress_bar.update()
+                    if (not show_progress_bar):
+                        print(f"{now_time()}: {dem_data['title']} failed. Recorded failure")
                     continue
 
                 if not any(
@@ -1119,12 +1180,15 @@ def process_all(show_progress_bar: bool = True):
                         "No stable terrain pixels in window",
                         "Expected one value, found 0",
                         "No overlapping stable terrain",
+                        "Less than 10 different cells exist",
                     ]
                 ):
 
                     raise exception
                 with open(failures_file, "a+") as outfile:
                     outfile.write(dem_data["title"] + ',"' + str(exception).replace("\n", " ") + '"\n')
+                if (not show_progress_bar):
+                    print(f"{now_time()}: {dem_data['title']} failed. Recorded failure")
                 progress_bar.update()
                 continue
             generate_difference(dem_coreg, verbose=(not show_progress_bar))
@@ -1435,13 +1499,12 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False, verbose: bool = T
 
 
 def main(client):
-    process_all(client=client)
+    process_all(show_progress_bar=False)
     # glacier_stack()
 
-    # median_stack()
 
 
 if __name__ == "__main__":
     #client = dask.distributed.Client("127.0.0.1:8786")
-    glacier_stack("dronbreen", client=None)
-    #main(client=client)
+    #glacier_stack("dronbreen", client=None)
+    main(None)
