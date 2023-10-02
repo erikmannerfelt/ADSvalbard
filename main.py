@@ -36,6 +36,7 @@ import dask
 import dask.distributed
 import dask.dataframe as dd
 import dask.array as da
+import inspect
 
 warnings.simplefilter("ignore", RuntimeWarning)
 np.seterr(all="ignore")
@@ -108,6 +109,9 @@ def get_data_urls():
             ),
         ],
     }
+
+    # TODO: Fix the 35 to 33 issue
+    urls["NP_DEMs"] = [url for url in urls["NP_DEMs"] if "_35.zip" not in url]
 
     for key in urls:
         for i, entry in enumerate(urls[key]):
@@ -325,7 +329,7 @@ def align_bounds(
 
 
 def get_bounds(
-    region: str = "heerland", res: tuple[float, float] | None = None, half_mod: bool = False
+    region: str = "kongsvegen", res: tuple[float, float] | None = None, half_mod: bool = False
 ) -> rio.coords.BoundingBox:
     """
     Get the bounding coordinates of the output DEMs.
@@ -345,6 +349,7 @@ def get_bounds(
         "svalbard": {"left": 341002.5, "bottom": 8455002.5, "right": 905002.5, "top": 8982002.5},
         "nordenskiold": {"left": 443002.5, "bottom": 8626007.5, "right": 560242.5, "top": 8703007.5},
         "heerland": {"left": 537010, "bottom": 8602780, "right": 582940, "top": 8656400},
+        "kongsvegen": {"left": 438960, "bottom": 8735190, "right": 470420, "top": 8764230},
     }
 
     bounds = region_bounds[region]
@@ -552,7 +557,11 @@ def build_npi_mosaic(verbose: bool = False) -> tuple[Path, Path]:
 
         dem_bbox = shapely.geometry.box(*dem.bounds)
         if not bounds_epsg25833.overlaps(dem_bbox):
-            continue
+            # TODO: Figure out why 13822 doesn't work with Kongsvegen...
+            if inspect.signature(get_bounds).parameters["region"].default == "kongsvegen" and "13822" in filepath.stem:
+                pass
+            else:
+                continue
 
         dem.crop(bounds_epsg25833.bounds)
        
@@ -902,24 +911,46 @@ def median_stack():
     plt.show()
 
 
-def big_median_stack(years: int | list[int] | None = 2021, n_threads: int | None = None, verbose: bool = True):
-
+def big_median_stack(years: int | list[int] | None = 2021, n_threads: int | None = None, raster_type: str = "dhdt", verbose: bool = True):
     temp_dir = get_temp_dir()
-    dhdt_dir = temp_dir.joinpath("dhdt")
+
+    if raster_type == "dhdt":
+        raster_dir = temp_dir.joinpath("dhdt")
+    elif raster_type == "dem":
+        raster_dir = temp_dir.joinpath("arcticdem_coreg")
+        
+    else:
+        raise NotImplementedError(f"Unknown raster type: {raster_type}") 
+
 
     if years is None:
         ext = ""
-        dirs = [d for d in dhdt_dir.glob("*") if d.is_dir()]
+        dirs = [d for d in raster_dir.glob("*") if d.is_dir()]
     if isinstance(years, int):
         ext = "_" + str(years)
-        dirs = [dhdt_dir.joinpath(str(years))]
+        dirs = [raster_dir.joinpath(str(years))]
+        years = [years]
     elif isinstance(years, list):
         ext = "_" + "_".join(map(str, years))
-        dirs = [dhdt_dir.joinpath(str(year)) for year in years]
+        dirs = [raster_dir.joinpath(str(year)) for year in years]
     else:
         raise TypeError(f"{years=} has unknown type: {type(years)=}")
 
-    output_path = dhdt_dir.joinpath(f"median_dhdt{ext}.tif")
+    if raster_type == "dhdt":
+        output_path = raster_dir.joinpath(f"median_dhdt{ext}.tif")
+        v_clip = 150 / (2021 - 2009)
+        pattern = "*_dhdt.tif"
+        # raster_files = []
+        # for directory in dirs:
+        #     raster_files += list(directory.glob(pattern))
+    elif raster_type == "dem":
+        output_path = temp_dir.joinpath(f"median_dem{ext}.tif")
+        v_clip = 1500
+        pattern = "*_dem_coreg.tif"
+    else:
+        raise NotImplementedError(f"Unknown raster type: {raster_type}") 
+        
+    raster_files = list(filter(lambda fp: int(fp.stem.split("_")[3][:4]) in years, raster_dir.rglob(pattern)))
 
     if output_path.is_file():
         return output_path
@@ -931,15 +962,11 @@ def big_median_stack(years: int | list[int] | None = 2021, n_threads: int | None
     crs = get_crs()
 
     block_size = [512] * 2
-    v_clip = 150 / (2021 - 2009)
 
     strips = get_strips()
 
-    dhdt_files = []
-    for directory in dirs:
-        dhdt_files += list(directory.glob("*_dhdt.tif"))
 
-    titles = {dh_path.stem[: dh_path.stem.index("_seg") + 5]: dh_path for dh_path in dhdt_files}
+    titles = {r_path.stem[: r_path.stem.index("_seg") + 5]: r_path for r_path in raster_files}
 
     locks = {path: threading.Lock() for path in titles.values()}
 
@@ -1118,7 +1145,7 @@ def process_all(show_progress_bar: bool = True):
     strips = get_strips()
 
     # All of Nordenskiöld Land
-    poi = shapely.geometry.box(*get_bounds("heerland", half_mod=False))
+    poi = shapely.geometry.box(*get_bounds(half_mod=False))
 
     # Build these first (or conversely, check that they exist)
     build_npi_mosaic(verbose=(not show_progress_bar))
@@ -1129,7 +1156,7 @@ def process_all(show_progress_bar: bool = True):
     # poi = shapely.geometry.box(548766,8655934,553271,8659162)
 
     # Remove the northern part of Isfjorden
-    poi = poi.difference(shapely.geometry.box(435428, 8679301, 497701, 8714978))
+    # poi = poi.difference(shapely.geometry.box(435428, 8679301, 497701, 8714978))
 
     failures_file = Path("failures.csv")
 
@@ -1146,10 +1173,11 @@ def process_all(show_progress_bar: bool = True):
 
             if dem_data["start_datetime"].year != current_year:
                 if not show_progress_bar:
-                    print(f"{now_time()}: Finished {current_year}. Creating dHdt mosaic")
+                    print(f"{now_time()}: Finished {current_year}. Creating dHdt and DEM mosaics")
                 else:
-                    progress_bar.set_description(f"Finished {current_year}. Creating dHdt mosaic")
-                big_median_stack(years=current_year, verbose=(not show_progress_bar))
+                    progress_bar.set_description(f"Finished {current_year}. Creating dHdt and DEM mosaics")
+                for raster_type in ["dhdt", "dem"]:
+                    big_median_stack(years=current_year, raster_type=raster_type, verbose=(not show_progress_bar))
 
                 current_year = dem_data["start_datetime"].year
 
