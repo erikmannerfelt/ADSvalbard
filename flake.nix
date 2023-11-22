@@ -10,7 +10,7 @@
       let
         pkgs = nixpkgs.legacyPackages.${system};
 
-        my-python = (nixrik.packages.${system}.python_from_requirements {python_packages=pkgs.python310Packages;}) ./requirements.txt;
+        my-python = (nixrik.packages.${system}.python_from_requirements {python_packages=pkgs.python311Packages;}) ./requirements.txt;
         packages = pkgs.lib.attrsets.recursiveUpdate (builtins.listToAttrs (map (pkg: { name = pkg.pname; value = pkg; }) (with pkgs; [
             pre-commit
             zsh
