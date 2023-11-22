@@ -271,7 +271,7 @@ def download_file(url: str, output_path: Path):
         shutil.move(temp_file, output_path)
 
 
-def download_arcticdem(dem_data: pd.Series):
+def download_arcticdem(dem_data: pd.Series, verbose: bool = True):
     data_dir = get_data_dir()
     ad_dir = data_dir.joinpath("ArcticDEM")
 
@@ -279,10 +279,10 @@ def download_arcticdem(dem_data: pd.Series):
     for kind in ["dem", "matchtag"]:
         filepath = ad_dir.joinpath(os.path.basename(dem_data[kind]))
         if not filepath.is_file():
-            with requests.get(dem_data[kind], stream=True) as request:
-                if request.status_code != 200:
-                    raise ValueError(f"{request.status_code=} {request.content=}")
-
+            if verbose:
+                print(f"{now_time()}: Downloading {dem_data[kind]}")
+            with requests.get(dem_data[kind], stream=True, timeout=30) as request:
+                request.raise_for_status()
                 with tempfile.TemporaryDirectory() as temp_dir:
 
                     temp_path = Path(temp_dir).joinpath("temp.tif")
@@ -1227,8 +1227,9 @@ def process_all(show_progress_bar: bool = True):
                 current_year = dem_data["start_datetime"].year  # type: ignore
 
             start_time = time.time()
-            progress_bar.set_description(f"Working on {dem_data['title']}")
-            dem_path, _ = download_arcticdem(dem_data)
+            if show_progress_bar:
+                progress_bar.set_description(f"Working on {dem_data['title']}")
+            dem_path, _ = download_arcticdem(dem_data, verbose=(not show_progress_bar))
             try:
                 dem_coreg = coregister(dem_path=dem_path, verbose=(not show_progress_bar))
             except Exception as exception:
