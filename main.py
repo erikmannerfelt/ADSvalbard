@@ -41,9 +41,11 @@ import inspect
 warnings.simplefilter("ignore", RuntimeWarning)
 np.seterr(all="ignore")
 
-REGIONS = {
-    "dronbreen": [536837.5, 8667472.5, 544677.5, 8679002.5],
-    "tinkarp": [548762.5, 8655937.5, 553272.5, 8659162.5],
+REGION = "haakonvii"
+
+GLACIERS = {
+    "dronbreen": {"bounds": [536837.5, 8667472.5, 544677.5, 8679002.5], "region": "nordenskiold"},
+    "tinkarp": {"bounds": [548762.5, 8655937.5, 553272.5, 8659162.5], "region": "nordenskiold"},
 }
 
 
@@ -239,8 +241,8 @@ def get_strips() -> gpd.GeoDataFrame:
         return out
 
     strips = gpd.GeoDataFrame.from_records([load(fp) for fp in filepaths])
-    strips["geometry"] = strips["geometry"].apply(shapely.geometry.shape)
-    strips.crs = CRS.from_epsg(4326)
+    strips = strips.set_geometry(strips["geometry"].apply(shapely.geometry.shape), crs=CRS.from_epsg(4326))
+    # strips.crs = CRS.from_epsg(4326)
     strips["geometry"] = gpd.GeoSeries.from_wkb(strips["geometry"].to_wkb(output_dimension=2))
     strips = strips.to_crs(crs)
 
@@ -329,7 +331,7 @@ def align_bounds(
 
 
 def get_bounds(
-    region: str = "kongsvegen", res: tuple[float, float] | None = None, half_mod: bool = False
+    region: str = REGION, res: tuple[float, float] | None = None, half_mod: bool = False
 ) -> rio.coords.BoundingBox:
     """
     Get the bounding coordinates of the output DEMs.
@@ -350,6 +352,7 @@ def get_bounds(
         "nordenskiold": {"left": 443002.5, "bottom": 8626007.5, "right": 560242.5, "top": 8703007.5},
         "heerland": {"left": 537010, "bottom": 8602780, "right": 582940, "top": 8656400},
         "kongsvegen": {"left": 438960, "bottom": 8735190, "right": 470420, "top": 8764230},
+        "haakonvii": {"left": 412970, "bottom": 8689380, "right": 495820, "top": 8837790}
     }
 
     bounds = region_bounds[region]
@@ -401,10 +404,10 @@ def get_crs() -> CRS:
     return CRS.from_epsg(32633)
 
 
-def get_temp_dir() -> Path:
+def get_temp_dir(label: str = REGION) -> Path:
     """Get (and create) the path to the directory to store temporary files in."""
 
-    temp_dir = get_data_dir().parent.joinpath("temp")
+    temp_dir = get_data_dir().parent.joinpath(f"temp.{label}")
     temp_dir.mkdir(exist_ok=True, parents=True)
     return temp_dir
 
@@ -414,7 +417,7 @@ def get_data_dir() -> Path:
     return Path("data/").absolute()
 
 
-def build_stable_terrain_mask(verbose: bool = False) -> Path:
+def build_stable_terrain_mask(region: str = REGION, verbose: bool = False) -> Path:
     """
     Build a stable terrain mask.
 
@@ -436,7 +439,7 @@ def build_stable_terrain_mask(verbose: bool = False) -> Path:
     """
 
     data_dir = get_data_dir()
-    temp_dir = get_temp_dir()
+    temp_dir = get_temp_dir(label=region)
     out_filepath = temp_dir.joinpath("stable_terrain.tif")
 
     if out_filepath.is_file():
@@ -511,7 +514,7 @@ def create_warped_vrt(
     del vrt
 
 
-def build_npi_mosaic(verbose: bool = False) -> tuple[Path, Path]:
+def build_npi_mosaic(region: str = REGION, verbose: bool = False) -> tuple[Path, Path]:
     """
     Build a mosaic of tiles downloaded from the NPI.
 
@@ -525,7 +528,7 @@ def build_npi_mosaic(verbose: bool = False) -> tuple[Path, Path]:
     """
 
     data_dir = get_data_dir()
-    temp_dir = get_temp_dir()
+    temp_dir = get_temp_dir(label=region)
 
     output_path = temp_dir.joinpath("npi_mosaic_clip.tif")
     output_year_path = temp_dir.joinpath("npi_mosaic_clip_years.tif")
@@ -1348,7 +1351,9 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False, verbose: bool = T
     #if client is None:
     #    client = dask.distributed.Client()
 
-    temp_dir = get_temp_dir()
+    glacier_info = GLACIERS[glacier]
+
+    temp_dir = get_temp_dir(glacier_info["region"])
     glacier_stack_dir = temp_dir.joinpath(f"glacier_stacks/{glacier}")
     glacier_stack_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1356,7 +1361,7 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False, verbose: bool = T
     poly_path = nc_path.with_stem(nc_path.stem + "_poly")
     stack_corr_path = poly_path.with_stem(poly_path.stem + "_corr")
 
-    poi = shapely.geometry.box(*REGIONS[glacier])
+    poi = shapely.geometry.box(*glacier_info["bounds"])
 
     res = (5, 5)
     width = int((poi.bounds[2] - poi.bounds[0]) / res[0])
@@ -1368,9 +1373,9 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False, verbose: bool = T
     ]
     if not nc_path.is_file() or force_redo:
 
-        dems_dir = Path("temp/arcticdem_coreg")
-        ref_dem_path, ref_dem_years_path = build_npi_mosaic()
-        stable_terrain_path = build_stable_terrain_mask()
+        dems_dir = temp_dir.joinpath("arcticdem_coreg")
+        ref_dem_path, ref_dem_years_path = build_npi_mosaic(region=glacier_info["region"])
+        stable_terrain_path = build_stable_terrain_mask(region=glacier_info["region"])
 
         i = 0
         arrays = []
@@ -1407,11 +1412,14 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False, verbose: bool = T
         stack = xr.Dataset({"ad_elevation": xr.DataArray(arrays[:i, :, :], coords=[("time", times)] + xr_coords)})
         stack = stack.sortby("time")
 
-        with rio.open(stable_terrain_path) as raster:
-            window = rio.windows.from_bounds(*poi.bounds, transform=raster.transform)
-            data = raster.read(1, window=window, masked=True, boundless=True).filled(0)
+        for name, path in [("stable_terrain", stable_terrain_path), ("ref_dem", ref_dem_path), ("ref_dem_year", ref_dem_years_path)]:
+            
+            with rio.open(path) as raster:
+                window = rio.windows.from_bounds(*poi.bounds, transform=raster.transform)
+                data = raster.read(1, window=window, masked=True, boundless=True).filled(0)
 
-        stack["stable_terrain"] = xr.DataArray(data, coords=xr_coords)
+            # stack[name] = xr.DataArray(data, coords=xr_coords)
+            stack[name] = ("y", "x"), data
 
         median_elevation = stack["ad_elevation"].median("time")
 
@@ -1423,6 +1431,8 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False, verbose: bool = T
         )
     else:
         stack = xr.open_dataset(nc_path, chunks={"x": 10, "y": 10})
+
+    raise NotImplementedError()
 
     if glacier == "tinkarp":
         pois = {
