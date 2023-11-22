@@ -5,7 +5,6 @@ import rasterio as rio
 import rasterio.features
 import rasterio.warp
 import os
-import xdem
 import geoutils as gu
 import matplotlib.pyplot as plt
 import scipy.ndimage
@@ -37,10 +36,16 @@ import dask.distributed
 import dask.dataframe as dd
 import dask.array as da
 import inspect
+import numba
+
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore", numba.NumbaDeprecationWarning)
+    import xdem
 
 warnings.simplefilter("ignore", RuntimeWarning)
 np.seterr(all="ignore")
 
+gdal.UseExceptions()
 REGION = "haakonvii"
 
 GLACIERS = {
@@ -561,7 +566,9 @@ def build_npi_mosaic(region: str = REGION, verbose: bool = False) -> tuple[Path,
         dem_bbox = shapely.geometry.box(*dem.bounds)
         if not bounds_epsg25833.overlaps(dem_bbox):
             # TODO: Figure out why 13822 doesn't work with Kongsvegen...
-            if inspect.signature(get_bounds).parameters["region"].default == "kongsvegen" and "13822" in filepath.stem:
+            if inspect.signature(get_bounds).parameters["region"].default in ["kongsvegen", "haakonvii"] and "13822" in filepath.stem:
+                pass
+            elif inspect.signature(get_bounds).parameters["region"].default in ["haakonvii"] and "13828" in filepath.stem:
                 pass
             else:
                 continue
@@ -596,6 +603,7 @@ def build_npi_mosaic(region: str = REGION, verbose: bool = False) -> tuple[Path,
 
     if verbose:
         print("Saving DEM mosaic")
+
     # Warp the VRT into one TIF
     gdal.Warp(
         str(output_path),
@@ -674,20 +682,46 @@ def prepare_arcticdem(dem_path: Path) -> tuple[Path, Path]:
 
     vrts = []
 
-    for filepath in [dem_path, mask_path]:
+    bounds: rio.coords.BoundingBox | None = None
+
+    for i, filepath in enumerate([dem_path, mask_path]):
         # First create a warped VRT to convert the CRS
         warp_vrt_path = ad_vrt_dir.joinpath(filepath.stem + f"_epsg{crs.to_epsg()}.vrt")
+
+        if i == 0:
+            with rio.open(filepath) as raster:
+
+                # Read the mask of overview level 8 if it exists. Otherwise the second overview, or worst, no overview
+                overviews = raster.overviews(1)
+                overview_level = 8 if 8 in overviews else overviews.get(2, 1)
+                mask = raster.read_masks(1, out_shape=(int(raster.height / overview_level), int(raster.width / overview_level)))
+
+                # Generate approximate coordinates of the pixels in the wrong CRS
+                coords = np.array(np.meshgrid(
+                    np.linspace(raster.bounds.left, raster.bounds.right, mask.shape[1]),
+                    np.linspace(raster.bounds.bottom, raster.bounds.top, mask.shape[0])[::-1],
+                ))
+
+                # Convert the coordinates to the right CRS and mask them to all data pixels only
+                coords = gpd.points_from_xy(*coords.reshape((2, -1)).T[mask.ravel() > 0].T, crs=raster.crs).to_crs(crs)
+
+                # Find the smallest "right CRS" bounds of the unmasked pixels in the raster
+                warp_bounds = align_bounds(rio.coords.BoundingBox(*coords.total_bounds), res=res, buffer=res[0])
+
+            # Intersect the smallest available bounds with the total bounds of the domain
+            bounds = rio.coords.BoundingBox(
+                left=max(full_bounds.left, warp_bounds.left),
+                bottom=max(full_bounds.bottom, warp_bounds.bottom),
+                right=min(full_bounds.right, warp_bounds.right),
+                top=min(full_bounds.top, warp_bounds.top),
+            )
+
+        # First warp the DEM to the right CRS
         create_warped_vrt(str(filepath), str(warp_vrt_path), out_crs=crs)
 
-        with rio.open(warp_vrt_path) as warp_raster:
-            warp_bounds = align_bounds(warp_raster.bounds, res=res, buffer=10 * res[0])
-
-        bounds = rio.coords.BoundingBox(
-            left=max(full_bounds.left, warp_bounds.left),
-            bottom=max(full_bounds.bottom, warp_bounds.bottom),
-            right=min(full_bounds.right, warp_bounds.right),
-            top=min(full_bounds.top, full_bounds.top),
-        )
+        # This is just to make the linters happy. It should never be true
+        if bounds is None:
+            raise NotImplementedError()
 
         # Then, build a new VRT to resample and crop the raster
         out_path = warp_vrt_path.with_stem(warp_vrt_path.stem + f"_{res[0]}m")
@@ -744,7 +778,7 @@ def coregister(dem_path: Path, verbose: bool = True):
     if verbose:
         print(f"{now_time()}: Loaded and modified mask")
 
-    tba_dem = gu.Raster(str(dem_vrt_path), load_data=True)
+    tba_dem: gu.Raster = gu.Raster(str(dem_vrt_path), load_data=True)
     tba_dem.set_mask(mask)
 
     if np.count_nonzero(np.isfinite(tba_dem.data.filled(np.nan))) == 0:
@@ -781,24 +815,31 @@ def coregister(dem_path: Path, verbose: bool = True):
         crs=tba_dem.crs,
         inlier_mask=stable_terrain_mask,
     )
-    del stable_terrain_mask
-    del ref_dem
-    if verbose:
-        print(f"{now_time()}: Finished co-registration. Transforming DEM")
 
     out_meta = output_path.with_suffix(".json")
-    metadata = []
+    metadata: dict[str, object] = {"steps": []}
     for part in coreg.pipeline:
-        metadata.append(
+        metadata["steps"].append(
             {
                 "name": re.search(r"coreg.*'", str(part.__class__)).group().replace("'", "").replace("coreg.", ""),
                 "meta": part.__dict__,
             }
         )
+
+    if verbose:
+        print(f"{now_time()}: Finished co-registration. Transforming DEM")
+    tba_dem = coreg.apply(tba_dem)
+
+    diff = tba_dem.data[stable_terrain_mask].filled(np.nan) - ref_dem.data[stable_terrain_mask].filled(np.nan)
+    metadata["stable_nmad"] = float(xdem.spatialstats.nmad(diff))
+    metadata["stable_bias"] = float(np.nanmedian(diff))
+    metadata["stable_fraction"] = float(np.count_nonzero(stable_terrain_mask) / np.prod(stable_terrain_mask.shape))
+    metadata["pixel_count"] = int(np.count_nonzero(np.isfinite(tba_dem.data)))
+    metadata["bounds"] = {b: float(getattr(tba_dem.bounds, b)) for b in ["left", "bottom", "right", "top"]}
+    metadata["crs"] = f"EPSG:{tba_dem.crs.to_epsg()}"
+
     with open(out_meta, "w") as outfile:
         json.dump(metadata, outfile, cls=NumpyArrayEncoder)
-
-    tba_dem = coreg.apply(tba_dem)
 
     if verbose:
         print(f"{now_time()}: Applied co-registration")
@@ -1158,10 +1199,11 @@ def process_all(show_progress_bar: bool = True):
     # Tinkarpbreen
     # poi = shapely.geometry.box(548766,8655934,553271,8659162)
 
-    # Remove the northern part of Isfjorden
-    # poi = poi.difference(shapely.geometry.box(435428, 8679301, 497701, 8714978))
+    # Remove the northern part of Isfjorden for Nordenskiold because it's too small to use.
+    if REGION == "nordenskiold":
+        poi = poi.difference(shapely.geometry.box(435428, 8679301, 497701, 8714978))
 
-    failures_file = Path("failures.csv")
+    failures_file = Path(f"failures.{REGION}..csv")
 
     strips = strips[strips.intersects(poi)].sort_values("start_datetime", ascending=False)
     if failures_file.is_file():
@@ -1170,11 +1212,11 @@ def process_all(show_progress_bar: bool = True):
 
     strips["start_datetime"] = pd.to_datetime(strips["start_datetime"])
 
-    current_year = strips["start_datetime"].dt.year.max()
+    current_year = strips["start_datetime"].dt.year.max()  # type: ignore
     with tqdm(total=strips.shape[0], disable=(not show_progress_bar)) as progress_bar:
         for _, dem_data in strips.iterrows():
 
-            if dem_data["start_datetime"].year != current_year:
+            if dem_data["start_datetime"].year != current_year:  # type: ignore
                 if not show_progress_bar:
                     print(f"{now_time()}: Finished {current_year}. Creating dHdt and DEM mosaics")
                 else:
@@ -1182,7 +1224,7 @@ def process_all(show_progress_bar: bool = True):
                 for raster_type in ["dhdt", "dem"]:
                     big_median_stack(years=current_year, raster_type=raster_type, verbose=(not show_progress_bar))
 
-                current_year = dem_data["start_datetime"].year
+                current_year = dem_data["start_datetime"].year  # type: ignore
 
             start_time = time.time()
             progress_bar.set_description(f"Working on {dem_data['title']}")

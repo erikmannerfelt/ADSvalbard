@@ -5,3 +5,4 @@ ADSvalbard.qgs~
 failures.csv
 .env
 .cache/
+temp\.*/
