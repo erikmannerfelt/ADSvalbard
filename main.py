@@ -1203,7 +1203,7 @@ def process_all(show_progress_bar: bool = True):
     if REGION == "nordenskiold":
         poi = poi.difference(shapely.geometry.box(435428, 8679301, 497701, 8714978))
 
-    failures_file = Path(f"failures.{REGION}..csv")
+    failures_file = Path(f"failures.{REGION}.csv")
 
     strips = strips[strips.intersects(poi)].sort_values("start_datetime", ascending=False)
     if failures_file.is_file():
