@@ -4,32 +4,22 @@
     nixrik.url = "gitlab:erikmannerfelt/nixrik";
     nixrik.inputs.nixpkgs.follows = "nixpkgs";
   };
-
-  outputs = { self, nixpkgs, nixrik }:
-    nixrik.lib.eachDefaultSystem (system:
+  outputs = {self, nixpkgs, nixrik}: {
+    devShells = nixrik.extra.lib.for_all_systems(pkgs_pre: (
       let
-        pkgs = nixpkgs.legacyPackages.${system};
-
-        my-python = (nixrik.packages.${system}.python_from_requirements {python_packages=pkgs.python311Packages;}) ./requirements.txt;
-        packages = pkgs.lib.attrsets.recursiveUpdate (builtins.listToAttrs (map (pkg: { name = pkg.pname; value = pkg; }) (with pkgs; [
+        pkgs = pkgs_pre.extend nixrik.overlays.python_extra;
+        my-python = pkgs.python311PackagesExtra.from_requirements ./requirements.txt;
+      in {
+        default = pkgs.mkShell {
+          name = "ADSvalbard";
+          buildInputs = with pkgs; [
+            my-python
+            pdal
             pre-commit
-            zsh
             graphviz
-          ]))) {
-            python=my-python;
-          };
-
-      in
-      {
-        inherit packages;
-        devShell = pkgs.mkShell {
-            name = "ADSvalbard";
-            buildInputs = pkgs.lib.attrValues packages;
-            shellHook = ''
-
-            '';
-          };
+          ];
+        };
       }
-  
-    );
+    ));
+  };
 }
