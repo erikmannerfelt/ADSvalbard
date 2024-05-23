@@ -46,11 +46,12 @@ warnings.simplefilter("ignore", RuntimeWarning)
 np.seterr(all="ignore")
 
 gdal.UseExceptions()
-REGION = "haakonvii"
+REGION = "svalbard"
 
 GLACIERS = {
     "dronbreen": {"bounds": [536837.5, 8667472.5, 544677.5, 8679002.5], "region": "nordenskiold"},
     "tinkarp": {"bounds": [548762.5, 8655937.5, 553272.5, 8659162.5], "region": "nordenskiold"},
+    "kongsvegen": {"bounds": [445484, 8738240, 468300, 8757503], "region": "haakonvii", "rgi_id": "RGI2000-v7.0-G-07-00254"},
 }
 
 
@@ -776,7 +777,7 @@ def coregister(dem_path: Path, verbose: bool = True):
 
     mask = prepare_mask(mask_vrt_path)
     if verbose:
-        print(f"{now_time()}: Loaded and modified mask")
+        print(f"\t{now_time()}: Loaded and modified mask")
 
     tba_dem: gu.Raster = gu.Raster(str(dem_vrt_path), load_data=True)
     tba_dem.set_mask(mask)
@@ -784,7 +785,7 @@ def coregister(dem_path: Path, verbose: bool = True):
     if np.count_nonzero(np.isfinite(tba_dem.data.filled(np.nan))) == 0:
         raise ValueError("No finite values in TBA DEM")
     if verbose:
-        print(f"{now_time()}: Loaded TBA DEM")
+        print(f"\t{now_time()}: Loaded TBA DEM")
 
     stable_terrain_path = build_stable_terrain_mask(verbose=verbose)
     stable_terrain_mask = gu.Raster(str(stable_terrain_path), load_data=False).crop(tba_dem, inplace=False)
@@ -795,14 +796,14 @@ def coregister(dem_path: Path, verbose: bool = True):
     if np.count_nonzero(np.isfinite(tba_dem.data.filled(np.nan)[stable_terrain_mask])) == 0:
         raise ValueError("No overlapping stable terrain")
     if verbose:
-        print(f"{now_time()}: Loaded stable terrain mask")
+        print(f"\t{now_time()}: Loaded stable terrain mask")
 
     del mask
 
     npi_mosaic_path, _ = build_npi_mosaic(verbose=verbose)
     ref_dem = gu.Raster(str(npi_mosaic_path), load_data=False).crop(tba_dem, inplace=False)
     if verbose:
-        print(f"{now_time()}: Loaded ref. DEM. Running co-registration")
+        print(f"\t{now_time()}: Loaded ref. DEM. Running co-registration")
     if np.count_nonzero(np.isfinite(ref_dem.data.filled(np.nan))) == 0:
         raise ValueError("No finite values in reference DEM")
 
@@ -827,7 +828,7 @@ def coregister(dem_path: Path, verbose: bool = True):
         )
 
     if verbose:
-        print(f"{now_time()}: Finished co-registration. Transforming DEM")
+        print(f"\t{now_time()}: Finished co-registration. Transforming DEM")
     tba_dem = coreg.apply(tba_dem)
 
     diff = tba_dem.data[stable_terrain_mask].filled(np.nan) - ref_dem.data[stable_terrain_mask].filled(np.nan)
@@ -842,12 +843,12 @@ def coregister(dem_path: Path, verbose: bool = True):
         json.dump(metadata, outfile, cls=NumpyArrayEncoder)
 
     if verbose:
-        print(f"{now_time()}: Applied co-registration")
+        print(f"\t{now_time()}: Applied co-registration")
 
     tba_dem.save(str(output_path), co_opts=get_xdem_dem_co())
 
     if verbose:
-        print(f"{now_time()}: Saved {output_path.name}")
+        print(f"\t{now_time()}: Saved {output_path.name}")
 
     return output_path
 
@@ -1096,7 +1097,7 @@ def big_median_stack(years: int | list[int] | None = 2021, n_threads: int | None
                     list(executor.map(lambda wi: process(wi, progress_bar=progress_bar), window_infos))
 
     if verbose:
-        print(f"Writing {output_path.name}")
+        print(f"{now_time()}: Writing {output_path.name}")
     with rio.open(
         output_path,
         "w",
@@ -1404,15 +1405,17 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False, verbose: bool = T
     poly_path = nc_path.with_stem(nc_path.stem + "_poly")
     stack_corr_path = poly_path.with_stem(poly_path.stem + "_corr")
 
-    poi = shapely.geometry.box(*glacier_info["bounds"])
+
 
     res = (5, 5)
-    width = int((poi.bounds[2] - poi.bounds[0]) / res[0])
-    height = int((poi.bounds[3] - poi.bounds[1]) / res[1])
-    transform = rio.transform.from_bounds(*poi.bounds, width, height)
+    bounds = align_bounds(rio.coords.BoundingBox(*glacier_info["bounds"]), res=res)
+    poi = shapely.geometry.box(*bounds)
+    width = int((bounds.right - bounds.left) / res[0])
+    height = int((bounds.top - bounds.bottom) / res[1])
+    transform = rio.transform.from_bounds(*bounds, width, height)
     xr_coords = [
-        ("y", np.linspace(poi.bounds[1] + res[1] / 2, poi.bounds[3] - res[1] / 2, height)[::-1]),
-        ("x", np.linspace(poi.bounds[0] + res[0] / 2, poi.bounds[2] - res[0] / 2, width)),
+        ("y", np.linspace(bounds.bottom + res[1] / 2, bounds.top - res[1] / 2, height)[::-1]),
+        ("x", np.linspace(bounds.left + res[0] / 2, bounds.right - res[0] / 2, width)),
     ]
     if not nc_path.is_file() or force_redo:
 
@@ -1420,10 +1423,18 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False, verbose: bool = T
         ref_dem_path, ref_dem_years_path = build_npi_mosaic(region=glacier_info["region"])
         stable_terrain_path = build_stable_terrain_mask(region=glacier_info["region"])
 
+        if "rgi_id" in glacier_info:
+            rgi = gpd.read_file("zip:///home/erik/Projects/UiO/HeerLandSurges/input/RGI7/RGI2000-v7.0-G-07_svalbard_jan_mayen.zip!RGI2000-v7.0-G-07_svalbard_jan_mayen.shp").query(f"rgi_id == '{glacier_info['rgi_id']}'").to_crs(32633).iloc[0]
+
+            rgi = rasterio.features.rasterize([rgi.geometry], out_shape=(height, width), transform=transform, default_value=1)
+        else:
+            rgi = None
+
         i = 0
         arrays = []
         dem_paths = list(dems_dir.iterdir())
-        arrays = np.empty((len(dem_paths), height, width), dtype="float32") + np.nan
+        # arrays = np.empty((len(dem_paths), height, width), dtype="float32") + np.nan
+        arrays = []
         times = []
 
         for filepath in tqdm(list(dems_dir.iterdir()), desc="Sampling rasters"):
@@ -1447,12 +1458,13 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False, verbose: bool = T
 
             year_dec = date.year + (date.month / 12) + (date.day / (30 * 12)) + (i / (365 * 24))
 
-            arrays[i, :, :] = data
+            # arrays[i, :, :] = data
+            arrays.append(data)
             times.append(year_dec)
 
             i += 1
 
-        stack = xr.Dataset({"ad_elevation": xr.DataArray(arrays[:i, :, :], coords=[("time", times)] + xr_coords)})
+        stack = xr.Dataset({"ad_elevation": xr.DataArray(arrays, coords=[("time", times)] + xr_coords)})
         stack = stack.sortby("time")
 
         for name, path in [("stable_terrain", stable_terrain_path), ("ref_dem", ref_dem_path), ("ref_dem_year", ref_dem_years_path)]:
@@ -1463,6 +1475,9 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False, verbose: bool = T
 
             # stack[name] = xr.DataArray(data, coords=xr_coords)
             stack[name] = ("y", "x"), data
+
+        if rgi is not None:
+            stack["rgi_mask"] = ("y", "x"), rgi
 
         median_elevation = stack["ad_elevation"].median("time")
 
