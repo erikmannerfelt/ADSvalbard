@@ -38,6 +38,9 @@ import dask.array as da
 import inspect
 import numba
 
+import adsvalbard.utilities
+from adsvalbard.rasters import build_npi_mosaic, build_stable_terrain_mask
+
 with warnings.catch_warnings():
     warnings.simplefilter("ignore", numba.NumbaDeprecationWarning)
     import xdem
@@ -353,17 +356,26 @@ def get_bounds(
     A bounding box of the region.
     """
 
-    region_bounds = {
-        "svalbard": {"left": 341002.5, "bottom": 8455002.5, "right": 905002.5, "top": 8982002.5},
-        "nordenskiold": {"left": 443002.5, "bottom": 8626007.5, "right": 560242.5, "top": 8703007.5},
-        "heerland": {"left": 537010, "bottom": 8602780, "right": 582940, "top": 8656400},
-        "kongsvegen": {"left": 438960, "bottom": 8735190, "right": 470420, "top": 8764230},
-        "haakonvii": {"left": 412970, "bottom": 8689380, "right": 495820, "top": 8837790}
-    }
+    if region != "svalbard":
 
-    bounds = region_bounds[region]
+        region_bounds = {
+            "svalbard": {"left": 341002.5, "bottom": 8455002.5, "right": 905002.5, "top": 8982002.5},
+            "nordenskiold": {"left": 443002.5, "bottom": 8626007.5, "right": 560242.5, "top": 8703007.5},
+            "heerland": {"left": 537010, "bottom": 8602780, "right": 582940, "top": 8656400},
+            "kongsvegen": {"left": 438960, "bottom": 8735190, "right": 470420, "top": 8764230},
+            "haakonvii": {"left": 412970, "bottom": 8689380, "right": 495820, "top": 8837790}
+        }
 
-    return align_bounds(bounds, res=res, half_mod=half_mod)
+        bounds = region_bounds[region]
+
+        return align_bounds(bounds, res=res, half_mod=half_mod)
+
+    crs = get_crs()
+    roi_path = Path("shapes/region_of_interest.geojson")
+    roi = gpd.read_file(roi_path).to_crs(crs)
+    res = get_res()
+    return adsvalbard.utilities.align_bounds(rasterio.coords.BoundingBox(*roi.total_bounds), res=res, half_mod=False)
+
 
 
 def get_transform(res: tuple[float, float] | None = None) -> rio.Affine:
@@ -423,7 +435,7 @@ def get_data_dir() -> Path:
     return Path("data/").absolute()
 
 
-def build_stable_terrain_mask(region: str = REGION, verbose: bool = False) -> Path:
+def build_stable_terrain_mask_old(region: str = REGION, verbose: bool = False) -> Path:
     """
     Build a stable terrain mask.
 
@@ -520,7 +532,8 @@ def create_warped_vrt(
     del vrt
 
 
-def build_npi_mosaic(region: str = REGION, verbose: bool = False) -> tuple[Path, Path]:
+
+def build_npi_mosaic_old(region: str = REGION, verbose: bool = False) -> tuple[Path, Path]:
     """
     Build a mosaic of tiles downloaded from the NPI.
 
@@ -1256,6 +1269,7 @@ def process_all(show_progress_bar: bool = True):
                         "Expected one value, found 0",
                         "No overlapping stable terrain",
                         "Less than 10 different cells exist",
+                        "Intersection is empty",
                     ]
                 ):
 

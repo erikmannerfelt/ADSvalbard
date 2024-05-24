@@ -3,6 +3,7 @@ temp/
 data/
 ADSvalbard.qgs~
 failures.csv*
+failures.*.csv
 .env
 .cache/
 temp\.*/
