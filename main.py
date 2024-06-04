@@ -1226,6 +1226,12 @@ def process_all(show_progress_bar: bool = True):
 
     strips["start_datetime"] = pd.to_datetime(strips["start_datetime"])
 
+    skip_paths = [
+        "SETSM_s2s041_W1W1_20190719_1020010085AAE100_10200100863B9000_2m_lsf_seg1_dem"
+
+
+    ]
+
     current_year = strips["start_datetime"].dt.year.max()  # type: ignore
     with tqdm(total=strips.shape[0], disable=(not show_progress_bar)) as progress_bar:
         for _, dem_data in strips.iterrows():
@@ -1236,7 +1242,9 @@ def process_all(show_progress_bar: bool = True):
                 else:
                     progress_bar.set_description(f"Finished {current_year}. Creating dHdt and DEM mosaics")
                 for raster_type in ["dhdt", "dem"]:
-                    big_median_stack(years=current_year, raster_type=raster_type, verbose=(not show_progress_bar))
+
+                    print("Skipping for now since it crashes. TODO: Fix that!")
+                    #big_median_stack(years=current_year, raster_type=raster_type, verbose=(not show_progress_bar))
 
                 current_year = dem_data["start_datetime"].year  # type: ignore
 
@@ -1244,6 +1252,9 @@ def process_all(show_progress_bar: bool = True):
             if show_progress_bar:
                 progress_bar.set_description(f"Working on {dem_data['title']}")
             dem_path, _ = download_arcticdem(dem_data, verbose=(not show_progress_bar))
+            if any(s in str(dem_path) for s in skip_paths):
+                print(f"Skipping {dem_path}")
+                continue
             try:
                 dem_coreg = coregister(dem_path=dem_path, verbose=(not show_progress_bar))
             except Exception as exception:
@@ -1270,6 +1281,7 @@ def process_all(show_progress_bar: bool = True):
                         "No overlapping stable terrain",
                         "Less than 10 different cells exist",
                         "Intersection is empty",
+                        "boolean index did not match indexed array along dimension 0",
                     ]
                 ):
 
