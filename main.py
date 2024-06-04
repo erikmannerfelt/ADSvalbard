@@ -37,6 +37,7 @@ import dask.dataframe as dd
 import dask.array as da
 import inspect
 import numba
+import contextlib
 
 import adsvalbard.utilities
 from adsvalbard.rasters import build_npi_mosaic, build_stable_terrain_mask
@@ -969,7 +970,7 @@ def median_stack():
     plt.show()
 
 
-def big_median_stack(years: int | list[int] | None = 2021, n_threads: int | None = None, raster_type: str = "dhdt", verbose: bool = True):
+def big_median_stack(years: int | list[int] | None = 2021, n_threads: int | None = None, raster_type: str = "dhdt", verbose: bool = True, write_in_mem: bool = False):
     temp_dir = get_temp_dir()
 
     if raster_type == "dhdt":
@@ -1029,7 +1030,6 @@ def big_median_stack(years: int | list[int] | None = 2021, n_threads: int | None
     locks = {path: threading.Lock() for path in titles.values()}
 
     write_lock = threading.Lock()
-    stack = np.zeros(shape, dtype="float32") - 9999
 
     window_infos = []
     for col_off in np.arange(0, shape[1], step=block_size[0]):
@@ -1057,76 +1057,92 @@ def big_median_stack(years: int | list[int] | None = 2021, n_threads: int | None
     # Shuffle the windows to reduce the chance that multiple threads wait to read the same file
     random.shuffle(window_infos)
 
-    def process(
-        window_info: list[dict[str, rio.windows.Window | tuple[Path, threading.Lock]]], progress_bar: tqdm | None = None
-    ) -> None:
-
-        window: rio.windows.Window = window_info["window"]
-        window_bounds = rio.windows.bounds(window, transform)
-
-        data = []
-
-        for path, lock in window_info["paths"]:
-            with lock:
-                with rio.open(path) as raster:
-                    raster_win = rio.windows.from_bounds(*window_bounds, raster.transform)
-
-                    data.append(
-                        np.clip(
-                            raster.read(1, window=raster_win, masked=True, boundless=True).filled(np.nan),
-                            -v_clip,
-                            v_clip,
-                        )
-                    )
-
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", "All-NaN slice")
-            median = np.nanmedian(data, axis=0)
-        del data
-
-        if np.count_nonzero(np.isfinite(median)) == 0:
-            progress_bar.update()
-            return median
-
-        # median[~np.isfinite(median)] = -9999
-
-        with write_lock:
-            # print(window.row_off, window.row_off + window.height, window.col_off,window.col_off + window.width)
-            stack[
-                window.row_off : window.row_off + window.height, window.col_off : window.col_off + window.width
-            ] = median
-
-        progress_bar.update()
-        return median
-
-    with tqdm(total=len(window_infos), desc="Calculating median blocks", smoothing=0.1) as progress_bar:
-        if n_threads == 1:
-            for window_info in window_infos:
-                process(window_info=window_info, progress_bar=progress_bar)
-        else:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=n_threads) as executor:
-                with warnings.catch_warnings():
-                    warnings.filterwarnings("ignore", "All-NaN slice")
-                    list(executor.map(lambda wi: process(wi, progress_bar=progress_bar), window_infos))
-
-    if verbose:
-        print(f"{now_time()}: Writing {output_path.name}")
-    with rio.open(
-        output_path,
-        "w",
-        "GTiff",
+    write_params = dict(
+        driver="GTiff",
         width=shape[1],
         height=shape[0],
         count=1,
         crs=crs,
         transform=transform,
-        dtype=stack.dtype,
+        dtype="float32",
         nodata=-9999,
         compress="deflate",
         tiled=True,
         zlevel=12,
-    ) as raster:
-        raster.write(np.where(np.isfinite(stack), stack, -9999), 1)
+    )
+
+    with contextlib.ExitStack() as stack:
+        
+        if write_in_mem:
+            stack = np.zeros(shape, dtype="float32") - 9999
+        else:
+            out_raster = stack.enter_context(rio.open(output_path, "w", **write_params))
+            
+
+        def process(
+            window_info: list[dict[str, rio.windows.Window | tuple[Path, threading.Lock]]], progress_bar: tqdm | None = None
+        ) -> None:
+
+            window: rio.windows.Window = window_info["window"]
+            window_bounds = rio.windows.bounds(window, transform)
+
+            data = []
+
+            for path, lock in window_info["paths"]:
+                with lock:
+                    with rio.open(path) as raster:
+                        raster_win = rio.windows.from_bounds(*window_bounds, raster.transform)
+
+                        data.append(
+                            np.clip(
+                                raster.read(1, window=raster_win, masked=True, boundless=True).filled(np.nan),
+                                -v_clip,
+                                v_clip,
+                            )
+                        )
+
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", "All-NaN slice")
+                median = np.nanmedian(data, axis=0)
+            del data
+
+            if np.count_nonzero(np.isfinite(median)) == 0:
+                progress_bar.update()
+                return median
+
+            # median[~np.isfinite(median)] = -9999
+
+            with write_lock:
+                # print(window.row_off, window.row_off + window.height, window.col_off,window.col_off + window.width)
+                if write_in_mem:
+                    stack[
+                        window.row_off : window.row_off + window.height, window.col_off : window.col_off + window.width
+                    ] = median
+                else:
+                    out_raster.write(np.where(np.isfinite(median), median, -9999), 1, window=window)
+
+            progress_bar.update()
+            return median
+
+        with tqdm(total=len(window_infos), desc="Calculating median blocks", smoothing=0.1) as progress_bar:
+            if n_threads == 1:
+                for window_info in window_infos:
+                    process(window_info=window_info, progress_bar=progress_bar)
+            else:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=n_threads) as executor:
+                    with warnings.catch_warnings():
+                        warnings.filterwarnings("ignore", "All-NaN slice")
+                        list(executor.map(lambda wi: process(wi, progress_bar=progress_bar), window_infos))
+
+    if write_in_mem:
+        if verbose:
+            print(f"{now_time()}: Writing {output_path.name}")
+        with rio.open(
+            output_path,
+            "w",
+            **write_params
+        ) as raster:
+            raster.write(np.where(np.isfinite(stack), stack, -9999), 1)
 
     return output_path
 
