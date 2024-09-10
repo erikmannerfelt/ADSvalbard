@@ -8,3 +8,8 @@ failures.*.csv
 .cache/
 temp\.*/
 *.nc
+cache/
+/cache
+move_and_symlink.sh
+hello
+*_test.py
