@@ -997,7 +997,7 @@ def big_median_stack(years: int | list[int] | None = 2021, n_threads: int | None
 
     if raster_type == "dhdt":
         output_path = raster_dir.joinpath(f"median_dhdt{ext}.tif")
-        v_clip = 150 / (2021 - 2009)
+        v_clip = 250 / (2021 - 2009)
         pattern = "*_dhdt.tif"
         # raster_files = []
         # for directory in dirs:
@@ -1020,7 +1020,7 @@ def big_median_stack(years: int | list[int] | None = 2021, n_threads: int | None
     transform = get_transform(res=res)
     crs = get_crs()
 
-    block_size = [512] * 2
+    block_size = [512 * 2] * 2
 
     strips = get_strips()
 
@@ -1030,6 +1030,7 @@ def big_median_stack(years: int | list[int] | None = 2021, n_threads: int | None
     locks = {path: threading.Lock() for path in titles.values()}
 
     write_lock = threading.Lock()
+    temp_path = output_path.with_name(output_path.name + ".tmp")
 
     window_infos = []
     for col_off in np.arange(0, shape[1], step=block_size[0]):
@@ -1067,6 +1068,7 @@ def big_median_stack(years: int | list[int] | None = 2021, n_threads: int | None
         dtype="float32",
         nodata=-9999,
         compress="deflate",
+        BIGTIFF="YES",
         tiled=True,
         zlevel=12,
     )
@@ -1076,7 +1078,7 @@ def big_median_stack(years: int | list[int] | None = 2021, n_threads: int | None
         if write_in_mem:
             stack = np.zeros(shape, dtype="float32") - 9999
         else:
-            out_raster = stack.enter_context(rio.open(output_path, "w", **write_params))
+            out_raster = stack.enter_context(rio.open(temp_path, "w", **write_params))
             
 
         def process(
@@ -1138,11 +1140,13 @@ def big_median_stack(years: int | list[int] | None = 2021, n_threads: int | None
         if verbose:
             print(f"{now_time()}: Writing {output_path.name}")
         with rio.open(
-            output_path,
+            temp_path,
             "w",
             **write_params
         ) as raster:
             raster.write(np.where(np.isfinite(stack), stack, -9999), 1)
+
+    shutil.move(temp_path, output_path)
 
     return output_path
 
@@ -1243,7 +1247,10 @@ def process_all(show_progress_bar: bool = True):
     strips["start_datetime"] = pd.to_datetime(strips["start_datetime"])
 
     skip_paths = [
-        "SETSM_s2s041_W1W1_20190719_1020010085AAE100_10200100863B9000_2m_lsf_seg1_dem"
+        "SETSM_s2s041_W1W1_20190719_1020010085AAE100_10200100863B9000_2m_lsf_seg1_dem",
+        "SETSM_s2s041_W1W3_20180405_10200100706CF700_104001003CAF7A00_2m_lsf_seg1_dem",
+        "SETSM_s2s041_WV01_20170522_10200100622AE000_1020010060E84300_2m_lsf_seg1",
+        "SETSM_s2s041_WV03_20150316_10400100085B1D00_1040010009170400_2m_lsf_seg6",
 
 
     ]
@@ -1259,8 +1266,8 @@ def process_all(show_progress_bar: bool = True):
                     progress_bar.set_description(f"Finished {current_year}. Creating dHdt and DEM mosaics")
                 for raster_type in ["dhdt", "dem"]:
 
-                    print("Skipping for now since it crashes. TODO: Fix that!")
-                    #big_median_stack(years=current_year, raster_type=raster_type, verbose=(not show_progress_bar))
+                    # print("Skipping for now since it crashes. TODO: Fix that!")
+                    big_median_stack(years=current_year, raster_type=raster_type, verbose=(not show_progress_bar))
 
                 current_year = dem_data["start_datetime"].year  # type: ignore
 
