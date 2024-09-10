@@ -1643,6 +1643,44 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False, verbose: bool = T
     plt.show()
 
 
+def symlink_region(region: str):
+
+    if region == REGION:
+        raise NotImplementedError("This is supposed to work with another region than the selected")
+
+    new_bounds = get_bounds(region=region)
+
+    
+    temp_dir = get_temp_dir() 
+    dem_dir = temp_dir / "arcticdem_coreg/"
+
+
+    dems_overlapping = []
+
+    for filepath in tqdm(list(dem_dir.glob("*dem_coreg.tif")), desc="Creating symlinks"):
+
+        year = int(filepath.stem.split("_")[3][:4])
+
+        out_path = temp_dir / f"{region}_dem_coreg/{year}" / filepath.name
+        if out_path.is_file() or out_path.is_symlink():
+            continue
+
+        with rio.open(filepath) as raster:
+            if not adsvalbard.utilities.bounds_intersect(new_bounds, raster.bounds):
+                continue
+
+
+        out_path.parent.mkdir(exist_ok=True, parents=True)
+
+        out_path.symlink_to(filepath)
+        out_path.with_suffix(".json").symlink_to(filepath.with_suffix(".json"))
+
+        dems_overlapping.append(filepath)
+
+    print(f"Added {len(dems_overlapping)} (x2) new symlinks")
+
+
+
 def main(client):
     process_all(show_progress_bar=False)
     # glacier_stack()
