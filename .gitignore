@@ -13,3 +13,5 @@ cache/
 move_and_symlink.sh
 hello
 *_test.py
+shapes/arcticdem_bad_patches.qmd
+/SETSM_s2s041*
