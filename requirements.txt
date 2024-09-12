@@ -22,3 +22,4 @@ jupyter-server-proxy
 projectfiles
 variete
 noisyopt
+scikit-learn
