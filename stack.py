@@ -212,10 +212,10 @@ def interp(data: xr.Dataset, degree: int, random_state: int = 0, slope_corr: str
     return out
 
 
-def get_poly_inner(arr: da.Array, res: float, orig_shape: list[int], times: np.ndarray, npi_dem_year: float, degree: int):
+def get_poly_inner(arr: da.Array, res: float, orig_shape: list[int], times: np.ndarray, npi_dem_year: float, degree: tuple[int, ...]):
 
     if arr.shape[0] == 1:
-        return np.empty((6 + degree + 1), dtype=np.float64)
+        return np.empty((6 + max(degree) + 1,len(degree)), dtype=np.float64)
     arr = arr.reshape(orig_shape)
 
     coords = (
@@ -257,53 +257,61 @@ def get_poly_inner(arr: da.Array, res: float, orig_shape: list[int], times: np.n
     d_t = d_t[filled]
     arr = arr[filled]
 
-    model = sklearn.pipeline.make_pipeline(
-        sklearn.preprocessing.PolynomialFeatures(degree=degree, include_bias=False),
-        sklearn.linear_model.RANSACRegressor(
-            estimator=sklearn.linear_model.LinearRegression(fit_intercept=False),
-            max_trials=100,
-            stop_probability=0.7,
-            min_samples=4,
-            random_state=0,
-        ),
-    )
+    out = []
+    for deg in degree:
 
-    model.fit(d_t[:, None], arr)
+        model = sklearn.pipeline.make_pipeline(
+            sklearn.preprocessing.PolynomialFeatures(degree=deg, include_bias=False),
+            sklearn.linear_model.RANSACRegressor(
+                estimator=sklearn.linear_model.LinearRegression(fit_intercept=False),
+                max_trials=100,
+                stop_probability=0.7,
+                min_samples=4,
+                random_state=0,
+            ),
+        )
 
-    inlier_mask = model.steps[-1][-1].inlier_mask_
+        model.fit(d_t[:, None], arr)
 
-    score = model.score(d_t[inlier_mask, None], arr[inlier_mask])
-    pred = model.predict(d_t[:, None])
+        inlier_mask = model.steps[-1][-1].inlier_mask_
 
-    n_inliers = np.count_nonzero(inlier_mask)
-    n_total = inlier_mask.size
+        score = model.score(d_t[inlier_mask, None], arr[inlier_mask])
+        pred = model.predict(d_t[:, None])
 
-    resi = arr - pred
-    nmad = 1.4826 * np.median(np.abs(np.median(resi) - resi))
+        n_inliers = np.count_nonzero(inlier_mask)
+        n_total = inlier_mask.size
 
-    # # Use the sympy Taylor shift to set x_0 to year zero.
-    coefs_init = np.r_[[0.00000001], model.steps[-1][-1].estimator_.coef_]
-    poly = sympy.Poly(coefs_init[::-1], sympy.abc.x).shift(-npi_dem_year)
-    coefs = poly.all_coeffs()[::-1]
+        resi = arr - pred
+        nmad = 1.4826 * np.median(np.abs(np.median(resi) - resi))
 
-    if False:
-        plt.title(f"NMAD: {nmad:.2f} m, score: {score:.2f}")
-        plt.scatter(d_t + npi_dem_year, arr, alpha=0.1)
+        # # Use the sympy Taylor shift to set x_0 to year zero.
+        # The "[::-1]" are because sklearn and sympy polys are ordered differently:
+        # - sympy: ... + ax² + bx + c
+        # - sklearn: a + bx + cx² + ...
+        coefs_init = np.r_[[0.00000001], model.steps[-1][-1].estimator_.coef_]
+        poly = sympy.Poly(coefs_init[::-1], sympy.abc.x).shift(-npi_dem_year)
+        coefs = np.r_[poly.all_coeffs()[::-1], [0.] * (max(degree) - deg)]
 
-        d_ts = np.linspace(d_t.min(), d_t.max())
-        plt.plot(d_ts + npi_dem_year, model.predict(d_ts[:, None]))
-        plt.plot(d_ts + npi_dem_year, coefs_init[2] * d_ts**2 + coefs_init[1] * d_ts + coefs_init[0])
-        d_ts += npi_dem_year
-        plt.plot(d_ts, coefs[2] * d_ts**2 + coefs[1] * d_ts + coefs[0])
+        # print(coefs)
 
-        plt.ylim(pred.min() - 0.5, pred.max() + 0.5)
-        plt.show()
+        if False:
+            plt.title(f"NMAD: {nmad:.2f} m, score: {score:.2f}")
+            plt.scatter(d_t + npi_dem_year, arr, alpha=0.1)
 
-    # print(score)
+            d_ts = np.linspace(d_t.min(), d_t.max())
+            plt.plot(d_ts + npi_dem_year, model.predict(d_ts[:, None]))
+            plt.plot(d_ts + npi_dem_year, coefs_init[2] * d_ts**2 + coefs_init[1] * d_ts + coefs_init[0])
+            d_ts += npi_dem_year
+            plt.plot(d_ts, coefs[2] * d_ts**2 + coefs[1] * d_ts + coefs[0])
 
-    return np.r_[coefs, [nmad, score, n_inliers, n_total, slope_x, slope_y]]
+            plt.ylim(pred.min() - 0.5, pred.max() + 0.5)
+            plt.show()
 
-    return
+        # print(score)
+
+        out.append(np.r_[coefs, [nmad, score, n_inliers, n_total, slope_x, slope_y]])
+
+    return np.transpose(out)
 
     yvals = arr[:, :, 1, :]
     print(arr.shape)
@@ -311,7 +319,7 @@ def get_poly_inner(arr: da.Array, res: float, orig_shape: list[int], times: np.n
     ...
 
 
-def get_poly(arr: da.Array, res: float, times: np.ndarray, npi_dem_year: float, degree: int):
+def get_poly(arr: da.Array, res: float, times: np.ndarray, npi_dem_year: float, degree: tuple[int, ...]):
     red = da.apply_along_axis(
         get_poly_inner,
         axis=1,
@@ -325,7 +333,7 @@ def get_poly(arr: da.Array, res: float, times: np.ndarray, npi_dem_year: float, 
     return red
 
 
-def determine_polynomials(out_filepath: Path, in_data: Path | xr.Dataset, degree: int = 3, slope_corr: str = "per-timestamp", write_lock = None):
+def determine_polynomials(out_filepath: Path, in_data: Path | xr.Dataset, degree: tuple[int, ...] = (1, 2, 3, 4), slope_corr: str = "per-timestamp", write_lock = None, chunk_num: int | None = None):
     if out_filepath.is_file():
         return out_filepath
 
@@ -335,7 +343,7 @@ def determine_polynomials(out_filepath: Path, in_data: Path | xr.Dataset, degree
             data = stack.enter_context(xr.open_dataset(in_data))
         else:
             data = in_data
-        data = data.isel(x=slice(200, 400), y=slice(200, 300)).load()
+        # data = data.isel(x=slice(200, 400), y=slice(200, 300)).load()
 
         # data = data.sel(x=slice(551000, 551600), y=slice(8645377, 8644875))
 
@@ -359,44 +367,40 @@ def determine_polynomials(out_filepath: Path, in_data: Path | xr.Dataset, degree
             .construct(x=["x_coarse", "x"], y=["y_coarse", "y"])
             .stack(coarse=["y_coarse", "x_coarse"])
         )
-        coarsened["npi_dem_year"] = coarsened["npi_dem_year"].median(["y", "x", "coarse"])
-        # coarsened[["npi_dem", "npi_dem_year"]] = coarsened[["npi_dem", "npi_dem_year"]].median(["y", "x"])
-
-        # d_h = xr.combine_nested(
-        #     [
-        #         (coarsened["arcticdem"] - coarsened["npi_dem"]).expand_dims({"coord": [1]}),
-        #         (coarsened["time"] - coarsened["npi_dem_year"]).expand_dims({"coord": [0]}),
-        #     ],
-        #     concat_dim="coord",
-        # )
         coarsened["d_h"] = coarsened["arcticdem"] - coarsened["npi_dem"]
+        coarsened["npi_dem_year"] = coarsened["npi_dem_year"].median(["y", "x"]).compute()
 
-        # coarsened["d_t"] = coarsened["time"] - coarsened["npi_dem_year"]
-
-        # degree = 2
-        now = time.time()
         stack.enter_context(warnings.catch_warnings())
         warnings.filterwarnings("ignore", category=sklearn.exceptions.UndefinedMetricWarning)
         warnings.simplefilter("ignore", category=sklearn.exceptions.UndefinedMetricWarning)
-        res = xr.apply_ufunc(
-            get_poly,
-            coarsened["d_h"],
-            input_core_dims=[["coarse", "y", "x", "time"]],
-            output_core_dims=[["coarse", "retvals"]],
-            output_dtypes=[np.float64],
-            dask_gufunc_kwargs={
-                "output_sizes": {"retvals": 9},
 
-            },
-            kwargs={
-                "res": 5.0,
-                "times": coarsened["time"].values - coarsened["npi_dem_year"].compute().item(),
-                "npi_dem_year": coarsened["npi_dem_year"].compute().item(),
-                "degree": degree
-            },
-            dask="parallelized",
 
-        ).unstack()
+        res = []
+        for year, subset in coarsened.groupby("npi_dem_year"):
+            subset_res = xr.apply_ufunc(
+                get_poly,
+                subset["d_h"],
+                input_core_dims=[["coarse", "y", "x", "time"]],
+                output_core_dims=[["coarse", "retvals", "order"]],
+                output_dtypes=[np.float64],
+                dask_gufunc_kwargs={
+                    "output_sizes": {"retvals": 7 + max(degree),"order": len(degree)},
+
+                },
+                kwargs={
+                    "res": 5.0,
+                    "times": coarsened["time"].values - year,
+                    "npi_dem_year": year,
+                    "degree": degree
+                },
+                dask="parallelized",
+
+            )
+            res.append(subset_res)
+
+        res = xr.combine_nested(res, "coarse").unstack()
+
+        now = time.time()
 
         out = coarsened.unstack()[["npi_dem", "npi_dem_year"]]
         grouped = coarsened.unstack()["arcticdem"].groupby(coarsened["time"].astype(int))
@@ -408,23 +412,20 @@ def determine_polynomials(out_filepath: Path, in_data: Path | xr.Dataset, degree
         out["x"] = out["x"].isel(y_coarse=0).mean("x")
         out["npi_dem"] = out["npi_dem"].median(["y", "x"])
 
-        # print(res.isel(retvals=-6).compute())
+        if chunk_num is not None:
+            out["chunk_num"] = ("y", "x"), np.repeat(chunk_num, out["y"].shape[0] * out["x"].shape[0]).reshape((out["y"].shape[0], out["x"].shape[0]))
 
-        out["coefs"] = res.isel(retvals=slice(0, degree + 1)).swap_dims(retvals="degree").assign_coords(degree=np.arange(degree + 1))
+        out["coefs"] = res.isel(retvals=slice(0, max(degree) + 1)).swap_dims(retvals="degree").assign_coords(degree=np.arange(max(degree) + 1), order=np.array(degree))
 
         for i, col in enumerate(["nmad", "score", "n_inliers", "n_total", "x_slope", "y_slope"]):
-            col_val = res.isel(retvals=degree + 1 + i)
+            col_val = res.isel(retvals=max(degree) + 1 + i)
             if "n_" in col:
                 col_val = col_val.astype(int)
             out[f"fit_{col}"] = col_val
 
-        out = out.swap_dims(y_coarse="y", x_coarse="x").drop(["x_coarse", "y_coarse"]).rename_dims(time="year")
+        out = out.swap_dims(y_coarse="y", x_coarse="x").drop(["x_coarse", "y_coarse"]).rename(time="year")
+        out = out.reindex(indexers={"year": np.arange(2010, 2023)})
         out["coefs"].loc[{"degree": 0}] += out["npi_dem"]
-
-        out = out.compute()
-        duration = time.time() - now
-
-        return
 
         temp_filepath = out_filepath.with_name(out_filepath.name + ".tmp")
         if write_lock is not None:
@@ -619,7 +620,7 @@ def process_chunk(
         arcticdem_paths=arcticdem_paths, chunk_bounds=parameters["chunk_bounds"], res=res, locks=locks
     )
     # determine_trends(parameters["coef_filepath"], data, chunk_name=parameters["chunk_id"], write_lock=write_lock)
-    determine_polynomials(parameters["poly_filepath"], data, write_lock=write_lock)
+    determine_polynomials(parameters["poly_filepath"], data, write_lock=write_lock, chunk_num=parameters["chunk_num"])
 
     return parameters["poly_filepath"]
 
@@ -643,21 +644,21 @@ def stack_dems(stack_res: float = 50.0, chunk_size: int = 1000):
         chunk_id = str(i).zfill(3)
         # coef_filepath = Path(f"temp/coeffs_chunk_{chunk_id}.nc")
 
-        chunk_bnd_box = shapely.geometry.box(*chunk_bounds)
-        poi = shapely.geometry.Point(550030, 8644360)
-        if not chunk_bnd_box.contains(poi):
-            continue
-        # stack_filepath = Path(f"temp/dem_stack_chunk_{chunk_id}.nc")
+        # chunk_bnd_box = shapely.geometry.box(*chunk_bounds)
+        # poi = shapely.geometry.Point(550030, 8644360)
+        # if not chunk_bnd_box.contains(poi):
+        #     continue
+        # # stack_filepath = Path(f"temp/dem_stack_chunk_{chunk_id}.nc")
 
-        # stack = make_dem_stack_mem(arcticdem_paths=arcticdem_paths, chunk_bounds=chunk_bounds, locks=locks, res=res)
-        # make_dem_stack(stack_filepath, arcticdem_paths=arcticdem_paths, chunk_bounds=chunk_bounds, locks=locks, res=res)
+        # # stack = make_dem_stack_mem(arcticdem_paths=arcticdem_paths, chunk_bounds=chunk_bounds, locks=locks, res=res)
+        # # make_dem_stack(stack_filepath, arcticdem_paths=arcticdem_paths, chunk_bounds=chunk_bounds, locks=locks, res=res)
 
-        chunk_id = "temp"
+        # chunk_id = "temp"
         poly_filepath = Path(f"temp/robust_coeffs_chunk_{chunk_id}.nc")
-        parameters = {"chunk_bounds": chunk_bounds, "chunk_id": chunk_id, "poly_filepath": poly_filepath}
-        process_chunk(parameters, locks=locks, arcticdem_paths=arcticdem_paths, res=res)
+        parameters = {"chunk_bounds": chunk_bounds, "chunk_id": chunk_id, "poly_filepath": poly_filepath, "chunk_num": i}
+        # process_chunk(parameters, locks=locks, arcticdem_paths=arcticdem_paths, res=res)
 
-        return
+        # return
         # return
 
         if not poly_filepath.is_file():
@@ -675,7 +676,7 @@ def stack_dems(stack_res: float = 50.0, chunk_size: int = 1000):
                 ),
                 to_process,
                 desc="Processing chunks",
-                max_workers=3,
+                max_workers=1,
             )
 
     # for i, chunk_bounds in tqdm.tqdm(enumerate(chunks), total=len(chunks)):
@@ -700,7 +701,16 @@ def stack_dems(stack_res: float = 50.0, chunk_size: int = 1000):
 
     #     filepaths.append(coef_filepath)
 
-    with xr.open_mfdataset(filepaths, chunks="auto") as data:
+    # with xr.open_mfdataset(filepaths, chunks="auto") as data:
+    with contextlib.ExitStack() as stack:
+
+        data_list = []
+        for filepath in filepaths:
+            part = stack.enter_context(xr.open_dataset(filepath, chunks="auto")).reindex(year=np.arange(2011, 2023))
+
+            data_list.append(part)
+
+        data  =xr.combine_by_coords(data_list)
         # data["fit_nmad"].plot(vmin=0, vmax=5)
         # plt.show()
         # return
@@ -723,28 +733,43 @@ def stack_dems(stack_res: float = 50.0, chunk_size: int = 1000):
         # if deg == 2:
         #     data["polyfit_coefficients"].loc[{"degree": 3}] = 0
 
-        return
-        points = {
-            "morsnev_front": {"x": 563416, "y": 8612261},
-            "scheele_front": {"x": 549132, "y": 8633176},
-            "morsnev_upper": {"x": 564529, "y": 8625499},
-        }
+        if True:
+            points = {
+                "morsnev_front": {"x": 563416, "y": 8612261},
+                "scheele_front": {"x": 549132, "y": 8633176},
+                "morsnev_upper": {"x": 564529, "y": 8625499},
+            }
 
-        for i, key in enumerate(points):
-            plt.subplot(1, len(points), i + 1)
-            point = data.sel(**points[key], method="nearest").compute()
-            point["yearly_med"].plot()
-            plt.errorbar(point["year"], point["yearly_med"], point["yearly_std"])
-            print(point["polyfit_coefficients"])
-            poly = xr.polyval(point["year"], point["coef"])
-            print(poly)
-            poly.plot()
-            plt.title(key)
-            for year in point["year"].values:
-                yearly = point.sel(year=year)
-                plt.annotate(f'{yearly["yearly_count"].item()}', (year, yearly["yearly_med"].item()))
-        plt.show()
-        return
+            for i, key in enumerate(points):
+                plt.subplot(1, len(points), i + 1)
+                point = data.sel(**points[key], method="nearest").compute()
+                point["ad_yearly_med"].plot()
+                plt.errorbar(point["year"], point["ad_yearly_med"], point["ad_yearly_std"])
+
+                for order, coefs in point["coefs"].groupby("order"):
+                    poly = xr.polyval(point["year"], coefs)
+                    plt.plot(poly["year"], poly, label=f"{order} degree")
+                plt.title(key)
+                for year in point["year"].values:
+                    yearly = point.sel(year=year)
+                    # plt.annotate(f'{yearly["ad_yearly_count"].item()}', (year, yearly["ad_yearly_med"].item()))
+                plt.legend()
+            plt.show()
+            return
+
+        if False:
+            for i, (order, poly) in enumerate(data.groupby("order")):
+                plt.subplot(2, 2, i + 1)
+                polyv = xr.polyval(data["year"], poly["coefs"])
+
+                res = (data["ad_yearly_med"] - polyv).compute()
+                offset = 1.4826 * np.abs(res - res.median()).median()
+
+                print(f"{order}: {offset:.2f}")
+                plt.title(order)
+                poly["fit_nmad"].plot(vmin=0, vmax=2)
+            plt.show()
+            return
 
         # return
         point = data.sel(x=561886, y=8650826, method="nearest")
@@ -774,9 +799,10 @@ def stack_dems(stack_res: float = 50.0, chunk_size: int = 1000):
         # return
 
         # year = 2015
+        data = data.sel(order=2)
         years = np.arange(2013, 2023)
         years = xr.DataArray(years, coords=[("year", years)])
-        dhdt = xr.polyval(years, derivative(data["coefs"], level=3))
+        dhdt = xr.polyval(years, derivative(data["coefs"], level=1))
         # print(dhdt)
 
         dhdt.sel(year=2017).plot(vmin=-3, vmax=3, cmap="RdBu")
