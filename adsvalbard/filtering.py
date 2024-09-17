@@ -4,11 +4,15 @@ import numpy as np
 import rasterio
 import rasterio.features
 from pathlib import Path
+import typing
 import scipy.spatial
 import warnings
 import pandas as pd
 from tqdm import tqdm
 import pickle
+import sklearn.ensemble
+import scipy.ndimage
+import time
 
 from adsvalbard.constants import CONSTANTS
 import adsvalbard.utilities
@@ -26,12 +30,44 @@ def get_eastings_northings(bounds: rasterio.coords.BoundingBox, height: int, wid
     return eastings, northings
     
 
-def get_bad_patch_stats(force_redo: bool = False):
+def get_gap_distance_tree(eastings: np.ndarray, northings: np.ndarray, nodata_mask: np.ndarray):
+    import sklearn.neighbors
+    import scipy.ndimage
+    # eastings, northings = get_eastings_northings(bounds, *shape)
 
+    # grad_x, grad_y = np.gradient(dem.data.mask.astype(int))
+
+    grad = scipy.ndimage.convolve(nodata_mask.astype(int), [[-1, -1, -1], [-1, 8, -1], [-1, -1, -1]], mode="constant") > 1
+
+    # grad = xdem.terrain.slope(dem.data.mask.astype(int), resolution=dem.res[0])
+
+    # plt.imshow(grad)
+    # plt.show()
+
+    # # grad = np.max([np.abs(grad_x), np.abs(grad_y)], axis=0)
+
+    # # print(grad.shape, dem.data.shape)
+
+    # return
+    return sklearn.neighbors.KDTree(np.transpose([coord[grad] for coord in [eastings, northings]]))
+    
+
+def get_patch_polygs() -> tuple[gpd.GeoDataFrame, str]:
     patch_polygs = gpd.read_file("shapes/arcticdem_bad_patches.geojson")
 
 
     checksum = adsvalbard.utilities.get_checksum([patch_polygs])
+
+    return patch_polygs, checksum
+
+def get_bad_patch_stats(force_redo: bool = False):
+
+    # patch_polygs = gpd.read_file("shapes/arcticdem_bad_patches.geojson")
+
+
+    # checksum = adsvalbard.utilities.get_checksum([patch_polygs])
+
+    patch_polygs, checksum = get_patch_polygs()
     cache_filepath = CONSTANTS.cache_dir / f"get_bad_patch_stats/get_bad_patch_stats-{checksum}.feather"
     if cache_filepath.is_file() and not force_redo:
         return gpd.read_feather(cache_filepath)
@@ -248,8 +284,272 @@ def run_prediction(all_patches):
 
     
 
+class GapModel:
+    def __init__(
+        self,
+        training_checksum: str,
+        model: sklearn.ensemble.HistGradientBoostingClassifier,
+        importance: pd.DataFrame,
+        score: float
+    ):
+        self.training_checksum = training_checksum
+        self.model = model
+        self.importance = importance
+        self.score = score
+
+    def __repr__(self) -> str:
+
+        return (
+            f"Model: {self.model}, score: {self.score:.3f}\n"
+            f"Training checksum: {self.training_checksum[:8]}..."
+        )
+        
+
+    def to_pickle(self, filepath: Path) -> None:
+        filepath.parent.mkdir(exist_ok=True)
+        with open(filepath, "wb") as outfile:
+            pickle.dump(self, outfile, protocol=5)
+
+    @classmethod
+    def from_pickle(cls, filepath: Path) -> typing.Self:
+        with open(filepath, "rb") as infile:
+            return pickle.load(infile)
+
+    @classmethod
+    def train(cls, force_redo: bool = False) -> typing.Self:
+        _, checksum = get_patch_polygs()
+        all_patches = get_bad_patch_stats(force_redo=force_redo)
+        bad_vs_good_frac = all_patches[all_patches["bad"]].shape[0] / all_patches.shape[0]
+        print(f"{bad_vs_good_frac * 100:.2f}% of values are flagged as bad. The rest are good.")
+
+        all_patches = all_patches.dropna(how="all", axis="columns")
+
+        import itertools
+        import sklearn.preprocessing
+        import sklearn.pipeline
+        import sklearn.inspection
+
+        x_cols = ["gap_distance", "npi_dh", "npi_dt", "median_dem"] + [str(col) for col in all_patches if "quadric_" in col]
+        # x_cols = ["dem", "slope", "curvature", "npi_dh"]
+        y_col = "bad"
+        # all_patches = all_patches.dropna(subset=x_cols)
+
+        xtrain, xtest, ytrain, ytest = sklearn.model_selection.train_test_split(all_patches[x_cols], all_patches[y_col], random_state=0)
+
+        # def get_score(combo: list[str]) -> float:
+        model = sklearn.ensemble.HistGradientBoostingClassifier(random_state=0)
+        model.fit(xtrain, ytrain)
+
+        # print(importance)
+        # print(importance.importances_mean)
+        # print(model.feature_importances_)
+        score = model.score(xtest, ytest)
+
+        print(f"Model score: {score:.3f}")
+
+        importance = sklearn.inspection.permutation_importance(
+            model,
+            xtest,
+            ytest,
+            n_repeats=20,
+            random_state=0,
+            n_jobs=-1
+        )
+
+        # print("Relative feature importance:")
+        # for i in importance.importances_mean.argsort()[::-1]:
+        #     # if importance.importances_mean[i] - 2 * importance.importances_std[i] > 0:
+        #     print(
+        #         f"\t{model.feature_names_in_[i]:<14}"
+        #         f"{importance.importances_mean[i]:.3f}"
+        #         f" +/- {importance.importances_std[i]:.3f}"
+        #     )
+
+        importance_df = pd.DataFrame({"name": model.feature_names_in_, "mean": importance.importances_mean, "std": importance.importances_std}).set_index("name")
+
+
+        return cls(training_checksum=checksum, model=model, importance=importance_df, score=score)
+        
+
+    @classmethod
+    def default(cls, force_redo: bool = False) -> typing.Self:
+
+        cache_path = CONSTANTS.cache_dir / "gap_model.pkl"
+
+        _, checksum = get_patch_polygs()
+
+        if cache_path.is_file() and not force_redo:
+            model_result = cls.from_pickle(cache_path)
+
+            if model_result.training_checksum != checksum:
+                print("Model training data checksum is not the same as the stored checksum. Re-training recommended.")
+
+            return model_result
+
+
+        results = cls.train(force_redo=force_redo)
+        results.to_pickle(cache_path)
+
+        return results
+
+
+def make_gap_mask_name(filename: str, parent: Path | None = None) -> Path:
+    year = int(filename.split("_")[3][:4])
+
+    if parent is None:
+        parent = Path("temp.svalbard/outlier_proba/")
+
+    return parent / f"{year}/{filename.replace('.tif', '')}_outlier_proba.tif"
+
+
+def create_gap_mask(filename: str, model: GapModel, verbose: bool = True) -> Path:
+
+    out_path = make_gap_mask_name(filename)
+    if out_path.is_file():
+        return out_path
+
+    start_time = time.time()
+    def update(text: str):
+
+        if not verbose:
+            return
+        duration = time.time() - start_time
+
+        print(f"+{duration:.2f}s\t{text}")
+        
+
+    year = int(filename.split("_")[3][:4])
+    filepaths = {
+        "dem": Path(f"temp.svalbard/arcticdem_coreg/{filename}.tif"),
+    }
+    filepaths.update(
+        {
+            "median_dem": filepaths["dem"].parent.parent / f"median_dem_{year}.tif",
+            "npi_dh": filepaths["dem"].parent.parent / f"dh/{year}/{filename}_dh.tif",
+            "npi_dt": filepaths["dem"].parent.parent / f"dt/{year}/{filename}_dt.tif",
+        }
+    )
+
+    with warnings.catch_warnings():
+      warnings.filterwarnings("ignore", message=".*'nopython' keyword.*")
+      import xdem
+    import geoutils as gu
+    import scipy.ndimage
+
+    update("Loading DEM")
+    dem = xdem.DEM(filepaths["dem"])
+
+    data_mask = ~scipy.ndimage.binary_dilation(dem.data.mask, structure=scipy.ndimage.generate_binary_structure(2, 2))
+
+    vals = pd.DataFrame({"dem": dem.data.filled(np.nan).ravel()})
+    x_cols = [str(col) for col in model.importance.index]
+
+    if "gap_distance" in x_cols:
+        update("Making gap distances")
+        # eastings, northings = get_eastings_northings(dem.bounds, *dem.shape)
+
+        # tree = get_gap_distance_tree(eastings=eastings, northings=northings, nodata_mask=dem.data.mask)
+
+        dist = scipy.ndimage.distance_transform_edt(~dem.data.mask) * dem.res[0]
+        vals["gap_distance"] = dist.ravel()
+        del dist
+
+        # vals["gap_distance"] = 0.
+        # vals.loc[data_mask.ravel(), "gap_distance"] = tree.query(np.transpose([eastings[data_mask], northings[data_mask]]))[0]
+
+        # del tree
+        # del eastings
+        # del northings
+
+
+    if any(f"quadric_{str(i).zfill(2)}" in x_cols for i in range(11)):
+        update("Making quadrics")
+
+
+        quadric = xdem.terrain.get_quadric_coefficients(dem.data, resolution=dem.res[0])
+        for i in range(quadric.shape[0]):
+            vals[f"quadric_{str(i).zfill(2)}"] = quadric[i].ravel()
+
+        del quadric
+
+
+    for key in ["median_dem", "npi_dh", "npi_dt"]:
+        if key not in x_cols:
+            continue
+        update(f"Loading {key}")
+
+        data = xdem.DEM(filepaths[key], load_data=False)
+        data.crop(dem.bounds)
+
+        vals[key] = data.data.filled(np.nan).ravel()
+
+
+    update("Predicting gap error probability")
+
+    outliers = np.ones(vals.shape[0], dtype="uint8").reshape(dem.shape) * 255
+
+    # raw_predictions = model.model._raw_predict(vals[x_cols].loc[data_mask.ravel()], n_threads=-1)
+    # outliers[data_mask] = (model.model._loss.predict_proba(raw_predictions)[:, 1] * 255).astype("uint8")
+
+    outliers[data_mask] = (model.model.predict_proba(vals[x_cols].loc[data_mask.ravel()])[:, 1] * 255).astype("uint8")
+    # outliers = (model.model.predict_proba(vals[x_cols])[:, 1] * 255).astype("uint8").reshape(dem.shape)
+    # outliers[dem.data.mask] = 255
+    # plt.imshow(outliers)
+    # plt.show()
+
+    
+    outliers = xdem.DEM.from_array(outliers, crs=dem.crs, transform=dem.transform)
+    del dem
+
+    update(f"Saving {out_path}")
+
+    # raise NotImplementedError()
+
+    out_path.parent.mkdir(exist_ok=True, parents=True)
+    outliers.save(out_path, tiled=True, co_opts={"ZLEVEL": "12"})
+
+    return out_path
+
+
+def generate_all_masks(verbose_progress: bool = False):
+
+    filestems = list(map(lambda fp: fp.stem, Path("temp.svalbard/heerland_dem_coreg/").glob("*/*.tif")))
+    model_result = GapModel.default()
+
+    finished = []
+    to_process = []
+
+    for i, stem in enumerate(filestems):
+        gap_path = make_gap_mask_name(filename=stem)
+
+        if gap_path.is_file():
+            finished.append(gap_path)
+        else:
+            to_process.append(i)
+
+    for i in tqdm(to_process, desc="Generating masks", disable=verbose_progress):
+        stem = filestems[i]
+        create_gap_mask(filename=stem, model=model_result, verbose=verbose_progress)
+
+    return
+
 
 def plot_bad_patches(force_redo: bool = False):
+
+
+    model_result = GapModel.default()
+    print(model_result.importance.sort_values("mean", ascending=False))
+    print(model_result)
+
+    test_file = "SETSM_s2s041_WV02_20160610_1030010056A0AB00_1030010058A14500_2m_lsf_seg1_dem_coreg"
+
+
+    gap_mask_path = create_gap_mask(test_file, model_result)
+    print(gap_mask_path)
+    
+
+
+    return
     all_patches = get_bad_patch_stats(force_redo=force_redo)
 
     bad_vs_good_frac = all_patches[all_patches["bad"]].shape[0] / all_patches.shape[0]
@@ -298,9 +598,9 @@ def plot_bad_patches(force_redo: bool = False):
     import itertools
     import sklearn.preprocessing
     import sklearn.pipeline
+    import sklearn.inspection
 
-
-    x_cols = ["gap_distance", "npi_dh"] + [str(col) for col in all_patches if "quadric_" in col]
+    x_cols = ["gap_distance", "npi_dh", "npi_dt", "median_dem"] + [str(col) for col in all_patches if "quadric_" in col]
     # x_cols = ["dem", "slope", "curvature", "npi_dh"]
     y_col = "bad"
     # all_patches = all_patches.dropna(subset=x_cols)
@@ -310,10 +610,31 @@ def plot_bad_patches(force_redo: bool = False):
     # def get_score(combo: list[str]) -> float:
     model = sklearn.ensemble.HistGradientBoostingClassifier(random_state=0)
     model.fit(xtrain, ytrain)
+
+    # print(importance)
+    # print(importance.importances_mean)
+    # print(model.feature_importances_)
     score = model.score(xtest, ytest)
 
     print(f"Model score: {score:.3f}")
 
+    importance = sklearn.inspection.permutation_importance(
+        model,
+        xtest,
+        ytest,
+        n_repeats=1,
+        random_state=42,
+        n_jobs=-1
+    )
+
+    print("Relative feature importance:")
+    for i in importance.importances_mean.argsort()[::-1]:
+        # if importance.importances_mean[i] - 2 * importance.importances_std[i] > 0:
+        print(
+            f"\t{model.feature_names_in_[i]:<14}"
+            f"{importance.importances_mean[i]:.3f}"
+            f" +/- {importance.importances_std[i]:.3f}"
+        )
 
     all_patches["pred_bad"] = model.predict_proba(all_patches[x_cols])[:, 1]
 
