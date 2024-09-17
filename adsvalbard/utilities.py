@@ -15,8 +15,13 @@ import rasterio.coords
 import rasterio.transform
 import rasterio.warp
 import datetime
+import hashlib
 
 from adsvalbard.constants import CONSTANTS
+
+
+def get_checksum(objects: list[Any]) -> str:
+    return hashlib.sha256("".join(map(str, objects)).encode()).hexdigest()
 
 
 def align_bounds(
