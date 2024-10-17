@@ -32,7 +32,7 @@ import sklearn.pipeline
 from tqdm.dask import TqdmCallback
 import skimage
 import dask
-import dask.distributed
+# import dask.distributed
 import dask.dataframe as dd
 import dask.array as da
 import inspect
@@ -41,6 +41,7 @@ import contextlib
 
 import adsvalbard.utilities
 from adsvalbard.rasters import build_npi_mosaic, build_stable_terrain_mask
+from adsvalbard.constants import CONSTANTS
 
 with warnings.catch_warnings():
     warnings.simplefilter("ignore", numba.NumbaDeprecationWarning)
@@ -1439,7 +1440,7 @@ def block_polyfit(rolled: xr.DataArray, res, max_distance, times, names):
     )
 
 
-def glacier_stack(glacier="tinkarp", force_redo: bool = False, verbose: bool = True, client: dask.distributed.Client | None = None):
+def glacier_stack(glacier="tinkarp", force_redo: bool = False, verbose: bool = True, client= None):
 
     #if client is None:
     #    client = dask.distributed.Client()
@@ -1648,8 +1649,8 @@ def symlink_region(region: str):
     if region == REGION:
         raise NotImplementedError("This is supposed to work with another region than the selected")
 
-    new_bounds = get_bounds(region=region)
-
+    # new_bounds = get_bounds(region=region)
+    new_bounds = align_bounds(CONSTANTS.regions[region])
     
     temp_dir = get_temp_dir() 
     dem_dir = temp_dir / "arcticdem_coreg/"

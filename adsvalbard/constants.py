@@ -17,6 +17,7 @@ class Constants(projectfiles.Constant):
     regions: dict[str, dict[str, float]] = {
         "svalbard": {"left": 341002.5, "bottom": 8455002.5, "right": 905002.5, "top": 8982002.5},
         "nordenskiold": {"left": 443002.5, "bottom": 8626007.5, "right": 560242.5, "top": 8703007.5},
+        "heerland": {"left": 537010, "bottom": 8602780, "right": 582940, "top": 8659000},
     }
 
 
