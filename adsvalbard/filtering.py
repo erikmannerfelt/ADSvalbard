@@ -60,8 +60,21 @@ def get_patch_polygs() -> tuple[gpd.GeoDataFrame, str]:
 
     return patch_polygs, checksum
 
-def get_bad_patch_stats(force_redo: bool = False):
+def get_bad_patch_stats(force_redo: bool = False, add_extra: bool = False) -> pd.DataFrame:
+    """Sample data for training a gap detection algorithm.
 
+    Parameters
+    ----------
+    force_redo
+        Reprocess the data even if there is a cached version.
+    add_extra
+        Add extra good points around bad patches. Assumes everything around the bad patch is good.
+
+    Returns
+    -------
+    A very big dataframe of labelled data to use for training/testing.
+
+    """
     # patch_polygs = gpd.read_file("shapes/arcticdem_bad_patches.geojson")
 
 
@@ -101,7 +114,13 @@ def get_bad_patch_stats(force_redo: bool = False):
             dem = xdem.DEM(str(filepath))
 
             progress_bar.set_description("Making gap distance map")
-            tree = scipy.spatial.KDTree(np.transpose([coord[dem.data.mask] for coord in get_eastings_northings(dem.bounds, *dem.shape)]))
+            dist = xdem.DEM.from_array(
+                scipy.ndimage.distance_transform_edt(~dem.data.mask) * dem.res[0],
+                transform=dem.transform,
+                crs=dem.crs
+            )
+            
+            # tree = scipy.spatial.KDTree(np.transpose([coord[dem.data.mask] for coord in get_eastings_northings(dem.bounds, *dem.shape)]))
 
             # distance_field = tree.query(np.transpose([eastings.ravel(), northings.ravel()]), workers=-1)[0].reshape(eastings.shape)
 
@@ -114,7 +133,9 @@ def get_bad_patch_stats(force_redo: bool = False):
 
                 # Crop the DEM to the patch, plus a buffer
                 try:
-                    dem_sub = dem.crop(adsvalbard.utilities.align_bounds(rasterio.coords.BoundingBox(*patch.geometry.bounds), buffer=100), inplace=False)
+                    buffer = 100 if add_extra else 10
+                    dem_sub = dem.crop(adsvalbard.utilities.align_bounds(rasterio.coords.BoundingBox(*patch.geometry.bounds), buffer=buffer), inplace=False)
+                    dist_sub = dist.crop(adsvalbard.utilities.align_bounds(rasterio.coords.BoundingBox(*patch.geometry.bounds), buffer=buffer), inplace=False)
                 except rasterio.windows.WindowError as exception:
                     raise ValueError(f"Patch does not overlap with DEM; {patch.year=}, {patch.filename=}") from exception
                     
@@ -131,20 +152,23 @@ def get_bad_patch_stats(force_redo: bool = False):
                 # Make a mask for data that exist and are outside of the patch 
                 outside_patch_mask = data_mask & (~in_patch_mask)
 
+                exact_mask = np.ones_like(in_patch_mask)
+
                 # First generate easting/northing coordinates, then extract the coordinates of the finite values in the patch 
                 eastings, northings = get_eastings_northings(dem_sub.bounds, *dem_sub.shape)
 
                 flagged = np.ones(in_patch_mask.shape, dtype=int)
                 # For "bad"-type patches, generate points outside of the patch and classify them as good
-                if patch["type"] == "bad":
-                    coords_in_patch = np.transpose([coord[in_patch_mask] for coord in [eastings, northings]])
+                if patch["type"] == "bad" and add_extra:
+                    # coords_in_patch = np.transpose([coord[in_patch_mask] for coord in [eastings, northings]])
 
                     # Get the distances to a gap of the values in the patch
-                    gap_distances_in_patch = tree.query(coords_in_patch)[0]
+                    # gap_distances_in_patch = tree.query(coords_in_patch)[0]
+                    gap_distances_in_patch = dist_sub.data[in_patch_mask]
                     dist_bins = np.linspace(gap_distances_in_patch.min(), gap_distances_in_patch.max(), num=11)
                     
                     # Calculate distances for every pixel in order to find matching training points outside of the patch
-                    distance_field = tree.query(np.transpose([eastings.ravel(), northings.ravel()]), workers=-1)[0].reshape(eastings.shape)
+                    # distance_field = tree.query(np.transpose([eastings.ravel(), northings.ravel()]), workers=-1)[0].reshape(eastings.shape)
 
                     # Initialize an index array. Extra point (pixel) indices will be added here
                     extra_points = np.empty((0,), dtype=int)
@@ -153,7 +177,7 @@ def get_bad_patch_stats(force_redo: bool = False):
                     # In these distance bins, try to match the amount of points in that bin and add as control points.
                     for i in range(1, dist_bins.shape[0]):
                         # First, find valid pixels with compatible distances
-                        compat_distances = (distance_field >= dist_bins[i -1]) & (distance_field <= dist_bins[i]) & outside_patch_mask
+                        compat_distances = (dist_sub.data >= dist_bins[i -1]) & (dist_sub.data <= dist_bins[i]) & outside_patch_mask
                         # Derive the indices of these compatible pixels
                         compat_indices = np.argwhere(compat_distances.ravel()).ravel()
 
@@ -175,6 +199,7 @@ def get_bad_patch_stats(force_redo: bool = False):
 
                     flagged.ravel()[extra_points] = 0
                     in_patch_mask.ravel()[extra_points] = True
+                    exact_mask.ravel()[extra_points] = False
 
 
                 coords_sub = np.transpose([coord[in_patch_mask] for coord in [eastings, northings]])
@@ -182,14 +207,15 @@ def get_bad_patch_stats(force_redo: bool = False):
 
                 data = gpd.GeoDataFrame(
                     {
-                        "gap_distance": tree.query(coords_sub)[0],
+                        # "gap_distance": #tree.query(coords_sub)[0],
                         "bad": (flagged[in_patch_mask] == 1) if (patch["type"] == "bad") else np.zeros_like(flagged, dtype=bool)[in_patch_mask],
+                        "exact": exact_mask[in_patch_mask],
                     },
                     geometry=gpd.points_from_xy(coords_sub[:, 0], coords_sub[:, 1], crs=CONSTANTS.crs_epsg)
                 )
 
 
-                for key, arr in [("dem", dem_sub)]:#, ("slope", slope), ("curvature", curv)]:
+                for key, arr in [("gap_distance", dist_sub), ("dem", dem_sub)]:#, ("slope", slope), ("curvature", curv)]:
                     data[key] = arr.data.data[in_patch_mask]
 
                 for j in range(coefs.shape[0]):
@@ -319,8 +345,12 @@ class GapModel:
     def train(cls, force_redo: bool = False) -> typing.Self:
         _, checksum = get_patch_polygs()
         all_patches = get_bad_patch_stats(force_redo=force_redo)
+        # all_patches = pd.read_feather("cache/get_bad_patch_stats/get_bad_patch_stats-5e56d0a7b7ccbb9b96412219d2c4169d4efc026fd300b38c74e2a1dba9965faf.feather")
+        all_patches = all_patches[all_patches["exact"]]
         bad_vs_good_frac = all_patches[all_patches["bad"]].shape[0] / all_patches.shape[0]
+
         print(f"{bad_vs_good_frac * 100:.2f}% of values are flagged as bad. The rest are good.")
+
 
         all_patches = all_patches.dropna(how="all", axis="columns")
 
@@ -346,6 +376,7 @@ class GapModel:
         score = model.score(xtest, ytest)
 
         print(f"Model score: {score:.3f}")
+        # raise NotImplementedError()
 
         importance = sklearn.inspection.permutation_importance(
             model,
@@ -402,10 +433,10 @@ def make_gap_mask_name(filename: str, parent: Path | None = None) -> Path:
     return parent / f"{year}/{filename.replace('.tif', '')}_outlier_proba.tif"
 
 
-def create_gap_mask(filename: str, model: GapModel, verbose: bool = True) -> Path:
+def create_gap_mask(filename: str, model: GapModel, verbose: bool = True, force_redo: bool = False) -> Path:
 
     out_path = make_gap_mask_name(filename)
-    if out_path.is_file():
+    if out_path.is_file() and not force_redo:
         return out_path
 
     start_time = time.time()
