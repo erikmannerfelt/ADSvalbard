@@ -5,7 +5,9 @@ odfpy
 pyarrow
 pytest
 rasterio
+rioxarray
 xdem
+fiona
 gdal
 graphviz
 zarr
@@ -13,11 +15,12 @@ mypy
 requests
 cdsapi
 bottleneck
-icepyx
 python-dotenv
 h5py
 pdal
 dask-gateway-server
+dask
+dask-expr
 jupyter-server-proxy
 projectfiles
 variete
