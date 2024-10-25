@@ -147,9 +147,7 @@ def generate_masks(start_year = 2012, end_year = 2023):
 
     outlines = gpd.read_file("shapes/glacier_outlines.sqlite")
 
-    outlines = outlines[outlines["glac_name"] == "Scheelebreen"].sort_values("src_date")
-
-    outlines = outlines.iloc[1:]
+    outlines = outlines[outlines["glac_name"] == "Vallåkrabreen"].sort_values("src_date")
 
     bounds = adsvalbard.utilities.align_bounds(rasterio.coords.BoundingBox(*outlines.total_bounds), buffer=CONSTANTS.res * 2)
 
@@ -195,7 +193,7 @@ def generate_masks(start_year = 2012, end_year = 2023):
         plt.figure(figsize=figsize)
         plt.title(str(time)[:11])
         plt.imshow(mask)
-        plt.savefig(f"tmp.fig/scheele_{str(i).zfill(5)}.jpg", dpi=300)
+        plt.savefig(f"tmp.fig/vallakra_{str(i).zfill(5)}.jpg", dpi=300)
         plt.close()
        
     return

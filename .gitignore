@@ -15,3 +15,5 @@ hello
 *_test.py
 shapes/arcticdem_bad_patches.qmd
 /SETSM_s2s041*
+figures/
+tmp.fig/

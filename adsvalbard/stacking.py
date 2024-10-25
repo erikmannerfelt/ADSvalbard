@@ -19,6 +19,7 @@ from adsvalbard.constants import CONSTANTS
 import adsvalbard.utilities
 
 def create_stack(region: str = "heerland") -> Path:
+    # TODO: Handle nodata correctly! I had lots of -9999. in the ArcticDEM stack series.
 
     # dem_paths = list(Path("temp.svalbard/heerland_dem_coreg/").glob("*/*dem_coreg.tif"))
 
@@ -148,26 +149,142 @@ def main():
     glacier_name = "N Fredbreen"
     # glacier_name = "Tinkarpbreen"
 
-    glacier = glaciers.query(f"glac_name == '{glacier_name}'")
 
     points = {
         "N Fredbreen": {
             "advancing_front": {"x": 545170, "y": 8626160},
-            "scheele": {"x": 545783, "y": 8626293},
+            "scheele": {"x": 545783, "y": 8626293, "desc": "Surge in 2021", "plot": True},
             "trend0": {"x": 543317.5, "y": 8627532.5}, 
-            "trend1": {"x": 543312.5, "y": 8627532.5} 
+            "trend1": {"x": 543312.5, "y": 8627532.5, "desc": "Slow surge", "plot": True} 
+        },
+        "Morsnevbreen": {
+            "tidewater_front": {"x": 563500, "y": 8612030, "desc": "Tidewater front advance", "plot": True},
+            "accumulation_area": {"x": 567018, "y": 8625060, "desc": "Acc. area during/post surge", "plot": True},
+        },
+        "Scheelebreen": {
+            "coast_point": {"x": 549063, "y": 8633541, "desc": "Near the coast", "plot": True},
+            "accumulation_area": {"x": 547717, "y": 8622038, "desc": "Accumulation area surge", "plot": True},
+        },
+        "Vallåkrabreen": {
+            "surge_bulge": {"x": 549520, "y": 8643117, "desc": "Surge bulge evolution", "plot": True},
+        },
+        "Arnesenbreen": {
+            "accumulation_area": {"x": 572236, "y": 8635558, "desc": "Accumulation area surge", "plot": True},
+        },
+        "Tinkarpbreen": {
+            "accumulation_area": {"x": 550486, "y": 8656975, "desc": "Accumulation area draining", "plot": True}
+        },
+        "Klubbebreen": {
+            "slow_surge_front": {"x": 548960, "y": 8628312, "desc": "Slow-surge front", "plot": True},
+        },
+        "Edvardbreen": {
+            "surge_bulge": {"x": 560374, "y": 8646527, "desc": "Surge bulge front", "plot": True},
+        },
+        "Kvalbreen": {
+            "retreat_then_surge": {"x": 569428, "y": 8610473, "desc": "Terminus retreat, then surge", "plot": True},
+
         }
     }
 
-    bounds = dict(zip(["xmin", "ymin", "xmax", "ymax"], glacier.geometry.buffer(500).total_bounds))
+    # points_to_plot = {"N Fredbreen": ["scheele", "trend1"], "Morsnevbreen": ["tidewater_front"], "Scheelebreen": ["coast_point"], "Vallåkrabreen": ["surge_bulge"], "Arnesenbreen": ["accumulation_area"]}
+
+    points_to_plot = {glac: {key: point for key, point in pts.items() if point.get("plot", False)} for glac, pts in points.items()}
 
     with xr.open_zarr(stack_path) as data:
+        data["elevation"] = data["elevation"].where(data["elevation"] != -9999.)
+        data["outlier_proba"] = data["outlier_proba"].astype("float32") / 255
 
-        # print(data["y"].max())
 
-        # bounds = subsets["tinkarp"]
+        n_panels = sum(len(point_dict.keys()) for point_dict in points_to_plot.values())
+        n_rows = int(np.sqrt(n_panels))
+        n_cols = int(np.ceil(n_panels / n_rows))
+
+        print(n_panels, n_rows, n_cols)
+
+        fig = plt.figure(figsize=(n_cols * 3, n_rows * 3))
+        axes = fig.subplots(n_rows, n_cols, sharex=True)
+        panel_i = 0
+        for glacier_name in points_to_plot:
+            # glacier = glaciers.query(f"glac_name == '{glacier_name}'")
+            # bounds = dict(zip(["xmin", "ymin", "xmax", "ymax"], glacier.geometry.buffer(500).total_bounds))
+            # subset = data.sel(x=slice(bounds["xmin"], bounds["xmax"]), y=slice(bounds["ymax"], bounds["ymin"]))
+            # mask = (
+            #     (subset["bounding_box"].sel(bounds="xmin") < data["x"].max()) &
+            #     (subset["bounding_box"].sel(bounds="xmax") > data["x"].min()) &
+            #     (subset["bounding_box"].sel(bounds="ymin") < data["y"].max()) &
+            #     (subset["bounding_box"].sel(bounds="ymax") > data["y"].min())
+            # )
+            # overlapping = mask["filename"].where(mask.compute(), drop=True)
+            # subset = subset.sel(filename=overlapping)
+            subset = data
+
+            for point_key in points_to_plot[glacier_name]:
+
+                axis: plt.Axes = axes.ravel()[panel_i]
+                point_coord = points_to_plot[glacier_name][point_key]
+                point = subset.sel(x=point_coord["x"], y=point_coord["y"], method="nearest").compute()
+
+                extreme_outliers = ((point["outlier_proba"] > 0.95) & (np.isfinite(point["elevation"])))# | (np.abs(point["elevation"] - point["elevation"].median("filename")) > 300)
+
+                point["elevation"] = point["elevation"].where(~extreme_outliers)
+                axis.scatter(point["date"], point["elevation"], c=point["outlier_proba"] * 100, zorder=2, vmin=50, vmax=100)
+                ylim = axis.get_ylim()
+
+                axis.set_ylim(ylim[0], ylim[1] + (ylim[1] - ylim[0]) * 0.1)
+                ylim = axis.get_ylim()
+
+                yticks = np.arange(ylim[0] - ylim[0] % 10, ylim[1] + 10, step=10).astype(int)
+                if yticks.shape[0] > 5:
+                    axis.set_yticks(yticks, minor=True)
+                    # print(list(filter(lambda i, tick: i % 3 == 0, enumerate(yticks)))
+                    # axis.set_yticks(list(map(lambda i, tick: tick, filter(lambda i, tick: i % 3 == 0, enumerate(yticks)))))
+                    axis.set_yticks(yticks[::3])
+                    # axis.set_yticklabels(["" if i % 3 != 0 else str(tick) for i, tick in enumerate(yticks)])
+                else:
+                    axis.set_yticks(yticks)
+
+                axis.text(0.01, 0.99, s="abcdefghijklmnopq"[panel_i] + ")", transform=axis.transAxes, ha="left", va="top")
+
+                if "desc" in point_coord:
+                    axis.text(0.5, 0.99, s=f"{glacier_name}\n{point_coord['desc']}", transform=axis.transAxes, ha="center", va="top")
+
+                if (n_outliers := np.count_nonzero(extreme_outliers.values)) > 0:
+                    axis.text(0.99, 0.01, s=f"Hidden {n_outliers} extreme outlier(s)", transform=axis.transAxes, ha="right", va="bottom", fontsize=7)
+
+                axis.grid(which="both", color="lightgray", linestyle="--", zorder=1)
+                
+
+                panel_i += 1
+
+        plt.text(0.01, 0.5, "Elevation (m a.s.l.)", transform=fig.transFigure, rotation=90, va="center", ha="left")
+        plt.subplots_adjust(left=0.052, bottom=0.036, right=0.995, top=0.974, wspace=0.188, hspace=0.155)
+        plt.savefig("figures/elevation_series_examples.jpg", dpi=600)
+        # plt.tight_layout()
+        plt.show()
+
+        return
+
+        # for i, (glacier_name, point_key) in enumerate(points_to_plot):
+
+        
+
+        poi_key = "scheele"
+        point = data.sel(x=[points[glacier_name][poi_key]["x"]], y=[points[glacier_name][poi_key]["y"]], method="nearest").isel(x=0, y=0)
+
+        plt.figure(dpi=200)
+        plt.scatter(point["date"], point["elevation"], c=point["outlier_proba"] * 100)
+        cbar = plt.colorbar()
+        cbar.set_label("Outlier probability (%)")
+        plt.ylabel("Elevation (m a.s.l.)")
+        plt.tight_layout()
+
+        plt.show()
+        return
+
+        print(point)
 
         data = data.sel(x=slice(bounds["xmin"], bounds["xmax"]), y=slice(bounds["ymax"], bounds["ymin"]))
+
         mask = (
             (data["bounding_box"].sel(bounds="xmin") < data["x"].max()) &
             (data["bounding_box"].sel(bounds="xmax") > data["x"].min()) &
@@ -177,8 +294,10 @@ def main():
         overlapping = mask["filename"].where(mask.compute(), drop=True)
         data = data.sel(filename=overlapping)
 
-        data["outlier_proba"] = data["outlier_proba"].astype("float32") / 255
-        data["weight"] = 1 / data["outlier_proba"] ** 2
+        # data["weight"] = 1 / (1 - data["outlier_proba"] ** 2)
+
+
+        return
 
         # data["yearly_med_filt"] = data["elevation"].where(data["outlier_proba"] < 0.8).groupby(data["date"].dt.year).median()
 
@@ -204,13 +323,13 @@ def main():
 
         data["diff"] = data["yearly_med"].diff("year").compute()
 
-        for i, (year, yearly) in enumerate(data["diff"].groupby("year", squeeze=False)):
+        for panel_i, (year, yearly) in enumerate(data["diff"].groupby("year", squeeze=False)):
             vals = yearly.values.squeeze()
 
             if np.count_nonzero(np.isfinite(vals)) == 0:
                 continue
 
-            if i == 0:
+            if panel_i == 0:
                 continue
 
             plt.title(f"{year} - {year - 1}")
@@ -230,8 +349,6 @@ def main():
 
         # pred = xr.polyval(x_coords, data["polyfit"])
 
-        poi_key = "scheele"
-        point = data.sel(x=[points[glacier_name][poi_key]["x"]], y=[points[glacier_name][poi_key]["y"]], method="nearest")
 
 
 
@@ -381,11 +498,11 @@ def main():
 
 
         with tqdm.dask.TqdmCallback():
-            i = data["interp"].compute().load()
+            panel_i = data["interp"].compute().load()
 
-            print(i)
+            print(panel_i)
 
-        i.sel(year=2022).plot()
+        panel_i.sel(year=2022).plot()
         plt.show()
         
         # out = 

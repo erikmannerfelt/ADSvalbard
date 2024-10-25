@@ -111,10 +111,17 @@ def get_bad_patch_stats(force_redo: bool = False, add_extra: bool = False) -> pd
             dh_path = filepath.parent.parent / f"dh/{year}/{filepath.stem}_dh.tif"
             dt_path = filepath.parent.parent / f"dt/{year}/{filepath.stem}_dt.tif"
 
+            extra_paths = {
+                "median_dem": median_path,
+                "npi_dt": dt_path,
+                "npi_dh": dh_path,
+            }
+            rasters = {key: xdem.DEM(str(fp), load_data=False) for key, fp in extra_paths.items()}
             dem = xdem.DEM(str(filepath))
+            progress_bar.set_description("Loading DEM")
 
             progress_bar.set_description("Making gap distance map")
-            dist = xdem.DEM.from_array(
+            rasters["gap_distance"] = xdem.DEM.from_array(
                 scipy.ndimage.distance_transform_edt(~dem.data.mask) * dem.res[0],
                 transform=dem.transform,
                 crs=dem.crs
@@ -134,10 +141,14 @@ def get_bad_patch_stats(force_redo: bool = False, add_extra: bool = False) -> pd
                 # Crop the DEM to the patch, plus a buffer
                 try:
                     buffer = 100 if add_extra else 10
-                    dem_sub = dem.crop(adsvalbard.utilities.align_bounds(rasterio.coords.BoundingBox(*patch.geometry.bounds), buffer=buffer), inplace=False)
-                    dist_sub = dist.crop(adsvalbard.utilities.align_bounds(rasterio.coords.BoundingBox(*patch.geometry.bounds), buffer=buffer), inplace=False)
+                    new_bounds = adsvalbard.utilities.align_bounds(rasterio.coords.BoundingBox(*patch.geometry.bounds), buffer=buffer)
+                    dem_sub = dem.crop(new_bounds, inplace=False)
+
+                    rst_sub = {key: raster.crop(dem_sub, inplace=False) for key, raster in rasters.items()}
+                    # TODO: Simply refer this to the dict instead of declaring a variable
+                    dist_sub = rst_sub["gap_distance"]
                 except rasterio.windows.WindowError as exception:
-                    raise ValueError(f"Patch does not overlap with DEM; {patch.year=}, {patch.filename=}") from exception
+                    raise ValueError(f"Patch does not overlap with DEM;\n{patch}") from exception
                     
 
                 # Convert the patch to a mask
@@ -215,8 +226,12 @@ def get_bad_patch_stats(force_redo: bool = False, add_extra: bool = False) -> pd
                 )
 
 
-                for key, arr in [("gap_distance", dist_sub), ("dem", dem_sub)]:#, ("slope", slope), ("curvature", curv)]:
-                    data[key] = arr.data.data[in_patch_mask]
+                for key, arr in [("dem", dem_sub), *list(rst_sub.items())]:#, ("slope", slope), ("curvature", curv)]:
+                    try:
+                        data[key] = arr.data[in_patch_mask].filled(np.nan)
+                    except IndexError as exception:
+                        raise ValueError(f"Failed to sample {key} on patch;\n{patch}") from exception
+                        
 
                 for j in range(coefs.shape[0]):
                     data[f"quadric_{str(j).zfill(2)}"] = coefs[j][in_patch_mask]
@@ -229,12 +244,13 @@ def get_bad_patch_stats(force_redo: bool = False, add_extra: bool = False) -> pd
 
             # Concatenate all patch data for this filepath, and then sample the final values.
             per_filepath = pd.concat(per_filepath)
-            progress_bar.set_description("Reading rasters")
-            for key, filepath in [("median_dem", median_path), ("npi_dt", dt_path), ("npi_dh", dh_path)]:
 
-                with rasterio.open(filepath) as raster, warnings.catch_warnings():
-                    warnings.filterwarnings("ignore", message=".*converting a masked element to nan.*")
-                    per_filepath[key] = np.fromiter(raster.sample(np.transpose([per_filepath["geometry"].x, per_filepath["geometry"].y]), masked=True), count=per_filepath.shape[0], dtype=raster.dtypes[0])
+            # progress_bar.set_description("Reading rasters")
+            # for key, filepath in [("median_dem", median_path), ("npi_dt", dt_path), ("npi_dh", dh_path)]:
+
+            #     with rasterio.open(filepath) as raster, warnings.catch_warnings():
+            #         warnings.filterwarnings("ignore", message=".*converting a masked element to nan.*")
+            #         per_filepath[key] = np.fromiter(raster.sample(np.transpose([per_filepath["geometry"].x, per_filepath["geometry"].y]), masked=True), count=per_filepath.shape[0], dtype=raster.dtypes[0])
 
             all_data.append(per_filepath)
 
@@ -378,6 +394,7 @@ class GapModel:
         print(f"Model score: {score:.3f}")
         # raise NotImplementedError()
 
+        print("Asessing feature importance. This takes time..")
         importance = sklearn.inspection.permutation_importance(
             model,
             xtest,
