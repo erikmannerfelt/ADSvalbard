@@ -339,13 +339,6 @@ class GapModel:
         self.model = model
         self.importance = importance
         self.score = score
-
-    def __repr__(self) -> str:
-
-        return (
-            f"Model: {self.model}, score: {self.score:.3f}\n"
-            f"Training checksum: {self.training_checksum[:8]}..."
-        )
         
 
     def to_pickle(self, filepath: Path) -> None:
@@ -441,6 +434,13 @@ class GapModel:
         results.to_pickle(cache_path)
 
         return results
+
+    def __repr__(self) -> str:
+
+        return (
+            f"Model: {self.model}, score: {self.score:.3f}\n"
+            f"Training checksum: {self.training_checksum[:8]}..."
+        )
 
 
 def make_gap_mask_name(filename: str, parent: Path | None = None) -> Path:
@@ -865,5 +865,3 @@ def plot_bad_patches(force_redo: bool = False):
     # plt.hist2d(patches["gap_distance"][nan_mask], np.log10(np.abs(patches["npi_dh"][nan_mask]) + 1e-3), density=True)
     # plt.scatter(patches["gap_distance"], np.log10(patches["npi_dh"].abs()), alpha=0.03)
     plt.show()
-
-

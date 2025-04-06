@@ -215,67 +215,6 @@ def generate_interpolated_times(start_year: int, end_year: int, freq: str = "MS"
 
     return times
 
-def generate_full_glacier_mask(region: str = "heerland", start_year = 2021, end_year=2023):
-
-    all_outlines = gpd.read_file("shapes/glacier_outlines.sqlite")
-    all_outlines["area_km2"] = all_outlines["geometry"].area / 1e6
-    all_outlines.sort_values("area_km2", inplace=True)
-
-    
-    bounds = CONSTANTS.regions[region]
-    shape = adsvalbard.utilities.get_shape(rasterio.coords.BoundingBox(**bounds), [CONSTANTS.res] * 2)
-    # eastings, northings = adsvalbard.utilities.generate_eastings_northings(bounds=bounds, shape=shape)
-    xr_coords = {
-        "time": generate_interpolated_times(start_year=start_year, end_year=end_year),
-        "y": np.linspace(bounds["bottom"] + CONSTANTS.res / 2, bounds["top"] - CONSTANTS.res / 2, shape[0])[::-1],
-        "x": np.linspace(bounds["left"] + CONSTANTS.res / 2, bounds["right"] - CONSTANTS.res / 2, shape[1]),
-    }
-
-    out_mask = da.zeros((xr_coords["time"].shape[0],) + shape, dtype="uint8")
-    # out_mask = xr.DataArray(
-    #     da.zeros((xr_coords["time"].shape[0],) + shape, dtype="uint8"),
-    #     coords=xr_coords,
-    # ).to_dataset(name="index_mask")
-
-    # out_mask["glacier_index"] = np.sort(all_outlines["mask_id"].unique()).astype("uint8")
-
-    extra = []
-    for i, (glac_name, outlines) in enumerate(all_outlines.groupby("glac_name")):
-
-        if outlines.iloc[0]["area_km2"] > 2:
-            continue
-        if len(extra) >= 4:
-            break
-
-        masks = generate_masks(outlines=outlines, start_year=start_year, end_year=end_year).reindex(time=xr_coords["time"]).bfill("time").ffill("time")
-
-        attrs = {key: outlines.iloc[0][key] for key in ["rgi_id", "glims_id", "glac_name", "mask_id"]} | {"n_outlines": outlines.shape[0], "first_outline": outlines["src_date"].min(), "last_outline": outlines["src_date"].max()}
-
-        new_extra = xr.Dataset().assign_coords(bounds=["xmin", "ymin", "xmax", "ymax"], glacier_index=[attrs["mask_id"]])
-        new_extra["bounding_box"] = ("glacier_index", "bounds"), [[masks["x"].min().item(), masks["y"].min().item(), masks["x"].max().item(), masks["y"].max().item()]]
-
-        for key in attrs:
-            if "mask_id" == key:
-                continue
-            new_extra[key] = ("glacier_index",), [attrs[key]]
-
-        extra.append(new_extra)
-
-        # out_mask.loc[{"x": masks.x, "y": masks.y}] += masks.astype("uint8") * np.uint8(attrs["mask_id"])
-
-        xslice = np.argwhere((xr_coords["x"] >= masks.x.min().item()) & ((xr_coords["x"] <= masks.x.max().item()))).ravel()[[0, -1]]
-        yslice = np.argwhere((xr_coords["y"] >= masks.y.min().item()) & ((xr_coords["y"] <= masks.y.max().item()))).ravel()[[0, -1]]
-
-        out_mask[:, yslice[0]:yslice[1] + 1, xslice[0]:xslice[1] + 1] += masks.values.astype("uint8") * np.uint8(attrs["mask_id"])
-        # print(pd.Series(xr_coords["x"]).isin(masks.x).map(lambda x: x[x], axis=1))
-        # out_mask["index_mask"].loc[{"x": masks.x, "y": masks.y}]+= masks.astype("uint8") * np.uint8(attrs["mask_id"])
-
-        
-    out = xr.concat(extra, dim="glacier_index").assign_coords(**xr_coords)
-    out["index_mask"] = ("time", "y", "x"), out_mask
-
-    print(out)
-
     # outlines = all_outlines[all_outlines["glac_name"] == "Scheelebreen"]
 
     # print(all_outlines.groupby("glac_name").first().geometry.area.sort_values() / 1e6)
@@ -462,6 +401,63 @@ def generate_masks(outlines: gpd.GeoDataFrame, start_year = 2012, end_year = 202
     # scipy.interpolate.RBFInterpolator(kernel="linear")
     
 
+def generate_full_glacier_mask(region: str = "heerland", start_year = 2021, end_year=2023):
 
+    all_outlines = gpd.read_file("shapes/glacier_outlines.sqlite")
+    all_outlines["area_km2"] = all_outlines["geometry"].area / 1e6
+    all_outlines.sort_values("area_km2", inplace=True)
 
+    
+    bounds = CONSTANTS.regions[region]
+    shape = adsvalbard.utilities.get_shape(rasterio.coords.BoundingBox(**bounds), [CONSTANTS.res] * 2)
+    # eastings, northings = adsvalbard.utilities.generate_eastings_northings(bounds=bounds, shape=shape)
+    xr_coords = {
+        "time": generate_interpolated_times(start_year=start_year, end_year=end_year),
+        "y": np.linspace(bounds["bottom"] + CONSTANTS.res / 2, bounds["top"] - CONSTANTS.res / 2, shape[0])[::-1],
+        "x": np.linspace(bounds["left"] + CONSTANTS.res / 2, bounds["right"] - CONSTANTS.res / 2, shape[1]),
+    }
 
+    out_mask = da.zeros((xr_coords["time"].shape[0],) + shape, dtype="uint8")
+    # out_mask = xr.DataArray(
+    #     da.zeros((xr_coords["time"].shape[0],) + shape, dtype="uint8"),
+    #     coords=xr_coords,
+    # ).to_dataset(name="index_mask")
+
+    # out_mask["glacier_index"] = np.sort(all_outlines["mask_id"].unique()).astype("uint8")
+
+    extra = []
+    for i, (glac_name, outlines) in enumerate(all_outlines.groupby("glac_name")):
+
+        if outlines.iloc[0]["area_km2"] > 2:
+            continue
+        if len(extra) >= 4:
+            break
+
+        masks = generate_masks(outlines=outlines, start_year=start_year, end_year=end_year).reindex(time=xr_coords["time"]).bfill("time").ffill("time")
+
+        attrs = {key: outlines.iloc[0][key] for key in ["rgi_id", "glims_id", "glac_name", "mask_id"]} | {"n_outlines": outlines.shape[0], "first_outline": outlines["src_date"].min(), "last_outline": outlines["src_date"].max()}
+
+        new_extra = xr.Dataset().assign_coords(bounds=["xmin", "ymin", "xmax", "ymax"], glacier_index=[attrs["mask_id"]])
+        new_extra["bounding_box"] = ("glacier_index", "bounds"), [[masks["x"].min().item(), masks["y"].min().item(), masks["x"].max().item(), masks["y"].max().item()]]
+
+        for key in attrs:
+            if "mask_id" == key:
+                continue
+            new_extra[key] = ("glacier_index",), [attrs[key]]
+
+        extra.append(new_extra)
+
+        # out_mask.loc[{"x": masks.x, "y": masks.y}] += masks.astype("uint8") * np.uint8(attrs["mask_id"])
+
+        xslice = np.argwhere((xr_coords["x"] >= masks.x.min().item()) & ((xr_coords["x"] <= masks.x.max().item()))).ravel()[[0, -1]]
+        yslice = np.argwhere((xr_coords["y"] >= masks.y.min().item()) & ((xr_coords["y"] <= masks.y.max().item()))).ravel()[[0, -1]]
+
+        out_mask[:, yslice[0]:yslice[1] + 1, xslice[0]:xslice[1] + 1] += masks.values.astype("uint8") * np.uint8(attrs["mask_id"])
+        # print(pd.Series(xr_coords["x"]).isin(masks.x).map(lambda x: x[x], axis=1))
+        # out_mask["index_mask"].loc[{"x": masks.x, "y": masks.y}]+= masks.astype("uint8") * np.uint8(attrs["mask_id"])
+
+        
+    out = xr.concat(extra, dim="glacier_index").assign_coords(**xr_coords)
+    out["index_mask"] = ("time", "y", "x"), out_mask
+
+    print(out)

@@ -70,6 +70,11 @@ class NumpyArrayEncoder(json.JSONEncoder):
         return json.JSONEncoder.default(self, obj)
 
 
+def get_data_dir() -> Path:
+    """Get the path to the data directory."""
+    return Path("data/").absolute()
+
+
 def get_data_urls():
     np_dem_base_url = "https://public.data.npolar.no/kartdata/S0_Terrengmodell/Delmodell/"
 
@@ -139,6 +144,99 @@ def get_data_urls():
             urls[key][i] = (url, data_dir.joinpath(key).joinpath(filename))
 
     return urls
+
+
+def download_file(url: str, output_path: Path):
+
+    with requests.get(url, stream=True) as request, tempfile.TemporaryDirectory() as temp_dir:
+        temp_file = Path(temp_dir).joinpath("file")
+        if request.status_code != 200:
+            raise ValueError(f"{request.status_code=} {request.content=}")
+
+        with open(temp_file, "wb") as outfile:
+            shutil.copyfileobj(request.raw, outfile)
+
+        shutil.move(temp_file, output_path)
+
+
+def get_res() -> tuple[float, float]:
+    """Get the horizontal/vertical resolution of the output DEMs."""
+    return (5.0, 5.0)
+
+
+def align_bounds(
+    bounds: rio.coords.BoundingBox | dict[str, float],
+    res: tuple[float, float] | None = None,
+    half_mod: bool = False,
+    buffer: float | None = None,
+) -> rio.coords.BoundingBox:
+    if isinstance(bounds, rio.coords.BoundingBox):
+        bounds = {key: getattr(bounds, key) for key in ["left", "bottom", "right", "top"]}
+
+    if res is None:
+        res = get_res()
+    # Ensure that the moduli of the bounds are zero
+    for i, bound0 in enumerate([["left", "right"], ["bottom", "top"]]):
+        for j, bound in enumerate(bound0):
+
+            mod = (bounds[bound] - (res[i] / 2 if half_mod else 0)) % res[i]
+
+            bounds[bound] = (
+                bounds[bound] - mod + (res[i] if i > 0 and mod != 0 else 0) + ((buffer or 0) * (1 if i > 0 else -1))
+            )
+
+    return rio.coords.BoundingBox(**bounds)
+
+
+def get_crs() -> CRS:
+    """Get the target Coordinate Reference System (CRS)."""
+    return CRS.from_epsg(32633)
+
+
+def get_bounds(
+    region: str = REGION, res: tuple[float, float] | None = None, half_mod: bool = False
+) -> rio.coords.BoundingBox:
+    """
+    Get the bounding coordinates of the output DEMs.
+
+    Arguments
+    ---------
+    - region: The selected region (with hardcoded bounds)
+    - res: Optional. Override the x/y resolution.
+    - half_mod: Whether the modulus should be calculated on half the pixel size (e.g. 50000 at 5m -> 50002.5)
+
+    Returns
+    -------
+    A bounding box of the region.
+    """
+
+    if region != "svalbard":
+
+        region_bounds = {
+            "svalbard": {"left": 341002.5, "bottom": 8455002.5, "right": 905002.5, "top": 8982002.5},
+            "nordenskiold": {"left": 443002.5, "bottom": 8626007.5, "right": 560242.5, "top": 8703007.5},
+            "heerland": {"left": 537010, "bottom": 8602780, "right": 582940, "top": 8656400},
+            "kongsvegen": {"left": 438960, "bottom": 8735190, "right": 470420, "top": 8764230},
+            "haakonvii": {"left": 412970, "bottom": 8689380, "right": 495820, "top": 8837790}
+        }
+
+        bounds = region_bounds[region]
+
+        return align_bounds(bounds, res=res, half_mod=half_mod)
+
+    crs = get_crs()
+    roi_path = Path("shapes/region_of_interest.geojson")
+    roi = gpd.read_file(roi_path).to_crs(crs)
+    res = get_res()
+    return adsvalbard.utilities.align_bounds(rasterio.coords.BoundingBox(*roi.total_bounds), res=res, half_mod=False)
+
+
+def get_temp_dir(label: str = REGION) -> Path:
+    """Get (and create) the path to the directory to store temporary files in."""
+
+    temp_dir = get_data_dir().parent.joinpath(f"temp.{label}")
+    temp_dir.mkdir(exist_ok=True, parents=True)
+    return temp_dir
 
 
 def get_strips() -> gpd.GeoDataFrame:
@@ -265,17 +363,9 @@ def get_strips() -> gpd.GeoDataFrame:
     return strips
 
 
-def download_file(url: str, output_path: Path):
-
-    with requests.get(url, stream=True) as request, tempfile.TemporaryDirectory() as temp_dir:
-        temp_file = Path(temp_dir).joinpath("file")
-        if request.status_code != 200:
-            raise ValueError(f"{request.status_code=} {request.content=}")
-
-        with open(temp_file, "wb") as outfile:
-            shutil.copyfileobj(request.raw, outfile)
-
-        shutil.move(temp_file, output_path)
+def now_time() -> str:
+    """Return a string showing the current time."""
+    return datetime.datetime.now().strftime("%H:%M:%S")
 
 
 def download_arcticdem(dem_data: pd.Series, verbose: bool = True):
@@ -311,73 +401,6 @@ def get_xdem_dem_co() -> dict[str, str]:
 def get_dem_co() -> list[str]:
     """Get DEM creation options for GDAL."""
     return [f"{k}={v}" for k, v in get_xdem_dem_co().items()]
-
-
-def get_res() -> tuple[float, float]:
-    """Get the horizontal/vertical resolution of the output DEMs."""
-    return (5.0, 5.0)
-
-
-def align_bounds(
-    bounds: rio.coords.BoundingBox | dict[str, float],
-    res: tuple[float, float] | None = None,
-    half_mod: bool = False,
-    buffer: float | None = None,
-) -> rio.coords.BoundingBox:
-    if isinstance(bounds, rio.coords.BoundingBox):
-        bounds = {key: getattr(bounds, key) for key in ["left", "bottom", "right", "top"]}
-
-    if res is None:
-        res = get_res()
-    # Ensure that the moduli of the bounds are zero
-    for i, bound0 in enumerate([["left", "right"], ["bottom", "top"]]):
-        for j, bound in enumerate(bound0):
-
-            mod = (bounds[bound] - (res[i] / 2 if half_mod else 0)) % res[i]
-
-            bounds[bound] = (
-                bounds[bound] - mod + (res[i] if i > 0 and mod != 0 else 0) + ((buffer or 0) * (1 if i > 0 else -1))
-            )
-
-    return rio.coords.BoundingBox(**bounds)
-
-
-def get_bounds(
-    region: str = REGION, res: tuple[float, float] | None = None, half_mod: bool = False
-) -> rio.coords.BoundingBox:
-    """
-    Get the bounding coordinates of the output DEMs.
-
-    Arguments
-    ---------
-    - region: The selected region (with hardcoded bounds)
-    - res: Optional. Override the x/y resolution.
-    - half_mod: Whether the modulus should be calculated on half the pixel size (e.g. 50000 at 5m -> 50002.5)
-
-    Returns
-    -------
-    A bounding box of the region.
-    """
-
-    if region != "svalbard":
-
-        region_bounds = {
-            "svalbard": {"left": 341002.5, "bottom": 8455002.5, "right": 905002.5, "top": 8982002.5},
-            "nordenskiold": {"left": 443002.5, "bottom": 8626007.5, "right": 560242.5, "top": 8703007.5},
-            "heerland": {"left": 537010, "bottom": 8602780, "right": 582940, "top": 8656400},
-            "kongsvegen": {"left": 438960, "bottom": 8735190, "right": 470420, "top": 8764230},
-            "haakonvii": {"left": 412970, "bottom": 8689380, "right": 495820, "top": 8837790}
-        }
-
-        bounds = region_bounds[region]
-
-        return align_bounds(bounds, res=res, half_mod=half_mod)
-
-    crs = get_crs()
-    roi_path = Path("shapes/region_of_interest.geojson")
-    roi = gpd.read_file(roi_path).to_crs(crs)
-    res = get_res()
-    return adsvalbard.utilities.align_bounds(rasterio.coords.BoundingBox(*roi.total_bounds), res=res, half_mod=False)
 
 
 
@@ -418,24 +441,6 @@ def get_shape(res: tuple[float, float] | None = None) -> tuple[int, int]:
     bounds = get_bounds(res=res)
 
     return (int((bounds.top - bounds.bottom) / res[1]), int((bounds.right - bounds.left) / res[0]))
-
-
-def get_crs() -> CRS:
-    """Get the target Coordinate Reference System (CRS)."""
-    return CRS.from_epsg(32633)
-
-
-def get_temp_dir(label: str = REGION) -> Path:
-    """Get (and create) the path to the directory to store temporary files in."""
-
-    temp_dir = get_data_dir().parent.joinpath(f"temp.{label}")
-    temp_dir.mkdir(exist_ok=True, parents=True)
-    return temp_dir
-
-
-def get_data_dir() -> Path:
-    """Get the path to the data directory."""
-    return Path("data/").absolute()
 
 
 def build_stable_terrain_mask_old(region: str = REGION, verbose: bool = False) -> Path:
@@ -753,11 +758,6 @@ def prepare_arcticdem(dem_path: Path) -> tuple[Path, Path]:
         vrts.append(out_path)
 
     return vrts[0], vrts[1]
-
-
-def now_time() -> str:
-    """Return a string showing the current time."""
-    return datetime.datetime.now().strftime("%H:%M:%S")
 
 
 def coregister(dem_path: Path, verbose: bool = True):

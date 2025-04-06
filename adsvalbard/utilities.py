@@ -402,4 +402,3 @@ def resampling_rio_to_gdal(resampling: rasterio.warp.Resampling) -> str:
 def now_time() -> str:
     """Return a string showing the current time."""
     return datetime.datetime.now().strftime("%H:%M:%S")
-

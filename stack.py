@@ -332,6 +332,23 @@ def get_poly(arr: da.Array, res: float, times: np.ndarray, npi_dem_year: float, 
     return red
 
 
+def derivative(coefficients: xr.DataArray, coord_name: str = "degree", level: int = 1) -> xr.DataArray:
+    # out = coefficients.copy()
+    out = xr.zeros_like(coefficients)
+
+    degrees = sorted(out[coord_name].values)
+    for i, degree in enumerate(degrees):
+        if (len(degrees) - 1) == i:
+            out.loc[{coord_name: degree}] = 0.0
+        else:
+            out.loc[{coord_name: degree}] = coefficients.sel(**{"degree": degree + 1}) * (degree + 1)
+
+    for _ in range(level - 1):
+        out = derivative(out, coord_name=coord_name, level=1)
+
+    return out
+
+
 def determine_polynomials(out_filepath: Path, in_data: Path | xr.Dataset, degree: tuple[int, ...] = (1, 2, 3, 4), slope_corr: str = "per-timestamp", write_lock = None, chunk_num: int | None = None):
     if out_filepath.is_file():
         return out_filepath
@@ -482,23 +499,6 @@ def determine_polynomials(out_filepath: Path, in_data: Path | xr.Dataset, degree
         shutil.move(temp_path, out_filepath)
 
     return out_filepath
-
-
-def derivative(coefficients: xr.DataArray, coord_name: str = "degree", level: int = 1) -> xr.DataArray:
-    # out = coefficients.copy()
-    out = xr.zeros_like(coefficients)
-
-    degrees = sorted(out[coord_name].values)
-    for i, degree in enumerate(degrees):
-        if (len(degrees) - 1) == i:
-            out.loc[{coord_name: degree}] = 0.0
-        else:
-            out.loc[{coord_name: degree}] = coefficients.sel(**{"degree": degree + 1}) * (degree + 1)
-
-    for _ in range(level - 1):
-        out = derivative(out, coord_name=coord_name, level=1)
-
-    return out
 
 
 def test_derivative():

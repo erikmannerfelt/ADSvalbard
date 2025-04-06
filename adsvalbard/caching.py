@@ -106,4 +106,3 @@ def test_precompile_cache():
 
         with open(cache_dir.joinpath(cache_name)) as infile:
             assert infile.read() == "2"
-
