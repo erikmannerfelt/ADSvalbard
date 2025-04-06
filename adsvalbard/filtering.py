@@ -559,9 +559,9 @@ def create_gap_mask(filename: str, model: GapModel, verbose: bool = True, force_
     return out_path
 
 
-def generate_all_masks(verbose_progress: bool = False):
+def generate_all_masks(subdir: str = "heerland_dem_coreg", verbose_progress: bool = False):
 
-    filestems = list(map(lambda fp: fp.stem, Path("temp.svalbard/heerland_dem_coreg/").glob("*/*.tif")))
+    filestems = list(map(lambda fp: fp.stem, Path(f"temp.svalbard/{subdir}/").glob("*/*.tif")))
     model_result = GapModel.default()
 
     finished = []

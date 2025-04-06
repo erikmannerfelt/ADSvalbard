@@ -5,7 +5,7 @@ import functools
 import rasterio as rio
 import json
 import numpy as np
-from typing import Any
+from typing import Any, Sequence
 import requests
 import os
 import tempfile
@@ -252,7 +252,7 @@ def shape_from_bounds_res(bounds: rasterio.coords.BoundingBox, res: list[float])
     -------
     The shape (height, width) of the raster.
     """
-    return int((bounds.top - bounds.bottom) / res[0]), int((bounds.right- bounds.left) / res[1])
+    return int((bounds.top - bounds.bottom) / res[1]), int((bounds.right- bounds.left) / res[0])
 
 
 def res_from_bounds_shape(bounds: rasterio.coords.BoundingBox, shape: tuple[int, int]) -> tuple[float, float]:
@@ -279,6 +279,31 @@ def res_from_bounds_shape(bounds: rasterio.coords.BoundingBox, shape: tuple[int,
     The resolution in [X, Y] of the raster.
     """
     return (bounds.right - bounds.left) / shape[1], (bounds.top - bounds.bottom) / shape[0]
+
+
+def generate_eastings_northings(bounds: rasterio.coords.BoundingBox, shape: tuple[int, int]) -> tuple[np.ndarray, np.ndarray]:
+    """Calculate easting/northing pixel midpoint coordinates for the given bounds and shape.
+
+    Parameters
+    ----------
+    bounds
+        The bounding box of the raster.
+    shape
+        The shape of the raster (height, width)
+
+    Returns
+    -------
+    A tuple of (eastings, northings), where eastings.shape == shape. The coordinates represent the center of the pixels.
+
+    """
+    res = res_from_bounds_shape(bounds=bounds, shape=shape)
+
+    eastings, northings = np.meshgrid(
+        np.linspace(bounds.left +  res[1]/ 2, bounds.right - res[1] / 2, shape[1]),
+        np.linspace(bounds.bottom + res[0]/ 2, bounds.top - res[0] / 2, shape[0])[::-1],
+    )
+    return eastings, northings
+    
 
 
 def warp_bounds(bounds: rasterio.coords.BoundingBox, in_crs: rio.CRS, out_crs: rio.CRS) -> rasterio.coords.BoundingBox:
