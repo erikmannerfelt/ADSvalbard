@@ -1,22 +1,23 @@
-from dask.array.core import PerformanceWarning
-import xarray as xr
+import json
+import shutil
+import warnings
+from pathlib import Path
+
 import dask
-import pandas as pd
+import geopandas as gpd
+import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
+import scipy.interpolate
 import tqdm
 import tqdm.dask
+import xarray as xr
 import zarr
-import matplotlib.pyplot as plt
-import geopandas as gpd
-import scipy.interpolate
+from dask.array.core import PerformanceWarning
 
-from pathlib import Path
-import json
-import warnings
-import shutil
-
-from adsvalbard.constants import CONSTANTS
 import adsvalbard.utilities
+from adsvalbard.constants import CONSTANTS
+
 
 def create_stack(region: str = "heerland") -> Path:
     # TODO: Handle nodata correctly! I had lots of -9999. in the ArcticDEM stack series.

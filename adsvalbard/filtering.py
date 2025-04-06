@@ -1,21 +1,22 @@
+import pickle
+import time
+import typing
+import warnings
+from pathlib import Path
+
 import geopandas as gpd
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import rasterio
 import rasterio.features
-from pathlib import Path
-import typing
-import scipy.spatial
-import warnings
-import pandas as pd
-from tqdm import tqdm
-import pickle
-import sklearn.ensemble
 import scipy.ndimage
-import time
+import scipy.spatial
+import sklearn.ensemble
+from tqdm import tqdm
 
-from adsvalbard.constants import CONSTANTS
 import adsvalbard.utilities
+from adsvalbard.constants import CONSTANTS
 
 
 def get_eastings_northings(bounds: rasterio.coords.BoundingBox, height: int, width: int) -> tuple[np.ndarray, np.ndarray]:
@@ -31,10 +32,10 @@ def get_eastings_northings(bounds: rasterio.coords.BoundingBox, height: int, wid
     
 
 def get_gap_distance_tree(eastings: np.ndarray, northings: np.ndarray, nodata_mask: np.ndarray):
-    import sklearn.neighbors
     import scipy.ndimage
-    # eastings, northings = get_eastings_northings(bounds, *shape)
+    import sklearn.neighbors
 
+    # eastings, northings = get_eastings_northings(bounds, *shape)
     # grad_x, grad_y = np.gradient(dem.data.mask.astype(int))
 
     grad = scipy.ndimage.convolve(nodata_mask.astype(int), [[-1, -1, -1], [-1, 8, -1], [-1, -1, -1]], mode="constant") > 1
@@ -262,6 +263,7 @@ def get_bad_patch_stats(force_redo: bool = False, add_extra: bool = False) -> pd
 
 def run_prediction(all_patches):
     all_patches = all_patches.sample(5000, random_state=0)
+    import sklearn.model_selection
     from matplotlib.colors import ListedColormap
     from sklearn.datasets import make_circles, make_classification, make_moons
     from sklearn.discriminant_analysis import QuadraticDiscriminantAnalysis
@@ -277,7 +279,6 @@ def run_prediction(all_patches):
     from sklearn.preprocessing import StandardScaler
     from sklearn.svm import SVC
     from sklearn.tree import DecisionTreeClassifier
-    import sklearn.model_selection
 
     names = [
         "Nearest Neighbors",
@@ -371,9 +372,10 @@ class GapModel:
         all_patches = all_patches.dropna(how="all", axis="columns")
 
         import itertools
-        import sklearn.preprocessing
-        import sklearn.pipeline
+
         import sklearn.inspection
+        import sklearn.pipeline
+        import sklearn.preprocessing
 
         x_cols = ["gap_distance", "npi_dh", "npi_dt", "median_dem"] + [str(col) for col in all_patches if "quadric_" in col]
         # x_cols = ["dem", "slope", "curvature", "npi_dh"]
@@ -641,12 +643,13 @@ def plot_bad_patches(force_redo: bool = False):
     # return
 
 
-    import sklearn.ensemble
-    import sklearn.model_selection
     import itertools
-    import sklearn.preprocessing
-    import sklearn.pipeline
+
+    import sklearn.ensemble
     import sklearn.inspection
+    import sklearn.model_selection
+    import sklearn.pipeline
+    import sklearn.preprocessing
 
     x_cols = ["gap_distance", "npi_dh", "npi_dt", "median_dem"] + [str(col) for col in all_patches if "quadric_" in col]
     # x_cols = ["dem", "slope", "curvature", "npi_dh"]

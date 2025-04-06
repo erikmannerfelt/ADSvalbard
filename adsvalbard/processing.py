@@ -1,18 +1,20 @@
-import adsvalbard.utilities
-import adsvalbard.arcticdem
-import adsvalbard.icesat2
-import shapely.geometry
-from adsvalbard.constants import CONSTANTS
-import pandas as pd
-import xarray as xr
-from tqdm import tqdm
-from variete import VRaster
 from pathlib import Path
-import xdem
-import numpy as np
+
 import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
 import scipy.optimize
 import scipy.spatial
+import shapely.geometry
+import xarray as xr
+import xdem
+from tqdm import tqdm
+from variete import VRaster
+
+import adsvalbard.arcticdem
+import adsvalbard.icesat2
+import adsvalbard.utilities
+from adsvalbard.constants import CONSTANTS
 
 FAILURE_FILE = CONSTANTS.temp_dir.joinpath("failures.csv")
 

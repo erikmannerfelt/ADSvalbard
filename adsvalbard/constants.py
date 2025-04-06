@@ -1,5 +1,6 @@
-import projectfiles
 from pathlib import Path
+
+import projectfiles
 
 
 class Constants(projectfiles.Constant):

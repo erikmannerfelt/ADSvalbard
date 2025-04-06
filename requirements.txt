@@ -27,3 +27,4 @@ variete
 noisyopt
 sympy
 scikit-learn
+ssort

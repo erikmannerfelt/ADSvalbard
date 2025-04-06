@@ -17,6 +17,7 @@
             pdal
             pre-commit
             graphviz
+            ruff
           ];
         };
       }

@@ -1,16 +1,18 @@
-import geopandas as gpd
-import projectfiles
-from pathlib import Path
 import functools
 import json
-import numpy as np
-from typing import Any
-import xarray as xr
-import pandas as pd
-import tempfile
 import os
+import tempfile
+from pathlib import Path
+from typing import Any
+
+import geopandas as gpd
+import numpy as np
+import pandas as pd
+import projectfiles
+import xarray as xr
 
 from adsvalbard.constants import CONSTANTS
+
 
 def precompile_cache(**kwargs):
     """Precompile projectfiles.cache with the given kwargs (can be overridden)"""

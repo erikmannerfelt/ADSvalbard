@@ -1,19 +1,20 @@
+import datetime
+import time
+
+import dask.array as da
 import geopandas as gpd
-import scipy
-import pandas as pd
+import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import rasterio
 import rasterio.features
-import matplotlib.pyplot as plt
-import datetime
-import tqdm
-import time
-import xarray as xr
-import dask.array as da
-
-from adsvalbard.constants import CONSTANTS
-import adsvalbard.utilities
+import scipy
 import shapely
+import tqdm
+import xarray as xr
+
+import adsvalbard.utilities
+from adsvalbard.constants import CONSTANTS
 
 
 def interpolate_masks(

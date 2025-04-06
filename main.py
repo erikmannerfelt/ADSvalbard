@@ -1,47 +1,48 @@
+import concurrent.futures
+import contextlib
+import datetime
+import inspect
+import json
+import os
+import random
+import re
+import shutil
+import tempfile
+import threading
+import time
+import warnings
 from pathlib import Path
-from pyproj import CRS
+
+import dask
+import dask.array as da
+# import dask.distributed
+import dask.dataframe as dd
 import geopandas as gpd
+import geoutils as gu
+import matplotlib.pyplot as plt
+import numba
+import numpy as np
+import pandas as pd
 import rasterio as rio
 import rasterio.features
 import rasterio.warp
-import os
-import geoutils as gu
-import matplotlib.pyplot as plt
-import scipy.ndimage
-import numpy as np
-import re
-import json
-from tqdm import tqdm
-from osgeo import gdal
-import datetime
-import pandas as pd
-import shapely.geometry
 import requests
-import concurrent.futures
-import shutil
-import warnings
-import tempfile
-import threading
-import random
-import time
-import xarray as xr
+import scipy.ndimage
 import scipy.optimize
-import sklearn.preprocessing
+import shapely.geometry
+import skimage
 import sklearn.linear_model
 import sklearn.pipeline
+import sklearn.preprocessing
+import xarray as xr
+from osgeo import gdal
+from pyproj import CRS
+from tqdm import tqdm
 from tqdm.dask import TqdmCallback
-import skimage
-import dask
-# import dask.distributed
-import dask.dataframe as dd
-import dask.array as da
-import inspect
-import numba
-import contextlib
 
 import adsvalbard.utilities
-from adsvalbard.rasters import build_npi_mosaic, build_stable_terrain_mask
 from adsvalbard.constants import CONSTANTS
+from adsvalbard.rasters import build_npi_mosaic, build_stable_terrain_mask
 
 with warnings.catch_warnings():
     warnings.simplefilter("ignore", numba.NumbaDeprecationWarning)
