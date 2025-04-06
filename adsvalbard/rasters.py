@@ -65,7 +65,7 @@ def vrt_warp(
         if isinstance(crs, int):
             kwargs[key] = rio.CRS.from_epsg(crs).to_wkt()
         elif isinstance(crs, rio.CRS):
-            kwargs[key] = crs.to_wkt() # type: ignore
+            kwargs[key] = crs.to_wkt()  # type: ignore
         else:
             kwargs[key] = crs
 
@@ -74,14 +74,18 @@ def vrt_warp(
     if dst_transform is not None and dst_res is not None:
         raise ValueError("dst_transform and dst_res cannot be used at the same time.")
     if dst_transform is not None and dst_bounds is not None:
-        raise ValueError("dst_transform and dst_bounds cannot be used at the same time.")
+        raise ValueError(
+            "dst_transform and dst_bounds cannot be used at the same time."
+        )
 
     if dst_shape is not None and dst_res is not None:
         raise ValueError("dst_shape and dst_res cannot be used at the same time.")
 
     if dst_transform is not None:
         # kwargs["dstTransform"] = dst_transform.to_gdal()
-        kwargs["outputBounds"] = list(rasterio.transform.array_bounds(*dst_shape, dst_transform))  # type: ignore
+        kwargs["outputBounds"] = list(
+            rasterio.transform.array_bounds(*dst_shape, dst_transform)
+        )  # type: ignore
     elif dst_bounds is not None:
         kwargs["outputBounds"] = list(dst_bounds)
 
@@ -100,7 +104,6 @@ def vrt_warp(
     gdal.Warp(str(output_filepath), str(input_filepath), **kwargs)
 
 
-
 def vrt_mosaic(output_path: Path, input_paths: list[Path]) -> None:
     """
     Build a mosaic from the given input paths.
@@ -115,7 +118,12 @@ def vrt_mosaic(output_path: Path, input_paths: list[Path]) -> None:
     output_path.parent.mkdir(exist_ok=True)
     gdal.BuildVRT(str(output_path), [str(p.absolute()) for p in input_paths])
 
-def build_npi_mosaic_chunk(filepath: Path, bounds: rasterio.coords.BoundingBox, dem_parts: list[tuple[rasterio.coords.BoundingBox, Path]]) -> tuple[Path, Path] | None:
+
+def build_npi_mosaic_chunk(
+    filepath: Path,
+    bounds: rasterio.coords.BoundingBox,
+    dem_parts: list[tuple[rasterio.coords.BoundingBox, Path]],
+) -> tuple[Path, Path] | None:
     """
     Build one chunk of the NPI DEM and DEM year mosaic.
 
@@ -145,18 +153,16 @@ def build_npi_mosaic_chunk(filepath: Path, bounds: rasterio.coords.BoundingBox, 
     out_shape = adsvalbard.utilities.get_shape(bounds)
     out_transform = adsvalbard.utilities.get_transform(bounds)
 
-    dem = np.zeros(out_shape, dtype="float32") - 9999.
+    dem = np.zeros(out_shape, dtype="float32") - 9999.0
     years = np.zeros(out_shape, dtype="uint16")
 
     for dem_part in dem_parts:
-
         year = int(dem_part[1].stem.split("_")[3])
 
         if not adsvalbard.utilities.bounds_intersect(dem_part[0], bounds):
             continue
 
         with rio.open(dem_part[1]) as raster:
-
             window = rasterio.windows.from_bounds(*bounds, transform=raster.transform)
 
             arr = raster.read(1, masked=True, window=window, boundless=True)
@@ -164,22 +170,37 @@ def build_npi_mosaic_chunk(filepath: Path, bounds: rasterio.coords.BoundingBox, 
             dem[~arr.mask] = arr.data[~arr.mask]
             years[~arr.mask] = year
 
-    if np.all(dem == -9999.):
+    if np.all(dem == -9999.0):
         return None
 
     filepath.parent.mkdir(exist_ok=True, parents=True)
     for path, arr in [(filepath, dem), (years_filepath, years)]:
+        nodata = -9999.0 if "float" in str(arr.dtype) else 0
 
-        nodata = -9999. if "float" in str(arr.dtype) else 0
-
-        with rio.open(path, "w", driver="GTiff", width=arr.shape[1], height=arr.shape[0], count=1, crs=rio.CRS.from_epsg(CONSTANTS.crs_epsg), transform=out_transform, dtype=arr.dtype, nodata=nodata, compress="deflate", tiled=True) as raster:
+        with rio.open(
+            path,
+            "w",
+            driver="GTiff",
+            width=arr.shape[1],
+            height=arr.shape[0],
+            count=1,
+            crs=rio.CRS.from_epsg(CONSTANTS.crs_epsg),
+            transform=out_transform,
+            dtype=arr.dtype,
+            nodata=nodata,
+            compress="deflate",
+            tiled=True,
+        ) as raster:
             raster.write(arr, 1)
-        
 
     return filepath, years_filepath
 
 
-def generate_raster_chunks(bounds: rasterio.coords.BoundingBox, res: float | None = None, chunksize: int = 10000) -> list[rasterio.coords.BoundingBox]:
+def generate_raster_chunks(
+    bounds: rasterio.coords.BoundingBox,
+    res: float | None = None,
+    chunksize: int = 10000,
+) -> list[rasterio.coords.BoundingBox]:
     """
     Generate chunks of a bounding box that can be processed independently.
 
@@ -230,18 +251,21 @@ def generate_raster_chunks(bounds: rasterio.coords.BoundingBox, res: float | Non
             if height == 0 or width == 0:
                 raise ValueError()
 
-            chunk_bounds = rasterio.coords.BoundingBox(*rasterio.windows.bounds(
-                window=rasterio.windows.Window(start_col, start_row, width, height),  # type: ignore
-                transform=transform, 
-            ))
+            chunk_bounds = rasterio.coords.BoundingBox(
+                *rasterio.windows.bounds(
+                    window=rasterio.windows.Window(start_col, start_row, width, height),  # type: ignore
+                    transform=transform,
+                )
+            )
 
             chunks.append(chunk_bounds)
 
     return chunks
-    
 
 
-def build_npi_mosaic(roi_path: Path = Path("shapes/region_of_interest.geojson"), verbose: bool = True) -> tuple[Path, Path]:
+def build_npi_mosaic(
+    roi_path: Path = Path("shapes/region_of_interest.geojson"), verbose: bool = True
+) -> tuple[Path, Path]:
     """
     Build DEM and DEM year mosaics of tiles downloaded from the NPI.
 
@@ -249,7 +273,7 @@ def build_npi_mosaic(roi_path: Path = Path("shapes/region_of_interest.geojson"),
     ----------
     roi_path
         The path to the region of interest shape. The total bounds are used to derive the bounds of the mask.
-        
+
     verbose
         Whether to print updates to the console
 
@@ -266,7 +290,11 @@ def build_npi_mosaic(roi_path: Path = Path("shapes/region_of_interest.geojson"),
     if dem_path.is_file() and years_path.is_file():
         return dem_path, years_path
 
-    total_bounds = adsvalbard.utilities.align_bounds(rasterio.coords.BoundingBox(*roi.total_bounds), res=[CONSTANTS.res] * 2, half_mod=False)
+    total_bounds = adsvalbard.utilities.align_bounds(
+        rasterio.coords.BoundingBox(*roi.total_bounds),
+        res=[CONSTANTS.res] * 2,
+        half_mod=False,
+    )
 
     chunks = generate_raster_chunks(bounds=total_bounds)
 
@@ -278,17 +306,25 @@ def build_npi_mosaic(roi_path: Path = Path("shapes/region_of_interest.geojson"),
     vrt_dir.mkdir(exist_ok=True, parents=True)
     vrts: list[tuple[rasterio.coords.BoundingBox, Path]] = []
     for filepath in tqdm(dem_paths, desc="Generating VRTs", disable=(not verbose)):
-
         output_filepath = vrt_dir / f"{filepath.stem}.vrt"
-        uri = f"/vsizip/{filepath}/{filepath.stem}/{filepath.stem.replace('NP_', '')}.tif"
+        uri = (
+            f"/vsizip/{filepath}/{filepath.stem}/{filepath.stem.replace('NP_', '')}.tif"
+        )
 
         with rio.open(uri) as raster:
             dem_bounds = adsvalbard.utilities.align_bounds(
                 bounds=adsvalbard.utilities.warp_bounds(raster.bounds, raster.crs, crs),
                 res=[CONSTANTS.res] * 2,
-                half_mod=False
+                half_mod=False,
             )
-        vrt_warp(output_filepath, input_filepath=uri, dst_crs=crs, dst_res=CONSTANTS.res, dst_bounds=dem_bounds, multithread=True)
+        vrt_warp(
+            output_filepath,
+            input_filepath=uri,
+            dst_crs=crs,
+            dst_res=CONSTANTS.res,
+            dst_bounds=dem_bounds,
+            multithread=True,
+        )
 
         vrts.append((dem_bounds, output_filepath))
 
@@ -297,11 +333,7 @@ def build_npi_mosaic(roi_path: Path = Path("shapes/region_of_interest.geojson"),
 
     for i, chunk in tqdm(list(enumerate(chunks)), desc="Generating DEM chunks"):
         filepath = chunk_dir / f"npi_mosaic_{str(i).zfill(3)}.tif"
-        result = build_npi_mosaic_chunk(
-            filepath=filepath,
-            bounds=chunk, 
-            dem_parts=vrts
-        )
+        result = build_npi_mosaic_chunk(filepath=filepath, bounds=chunk, dem_parts=vrts)
         if result is None:
             continue
 
@@ -314,7 +346,9 @@ def build_npi_mosaic(roi_path: Path = Path("shapes/region_of_interest.geojson"),
     return dem_path, years_path
 
 
-def build_stable_terrain_mask(roi_path: Path = Path("shapes/region_of_interest.geojson"), verbose: bool = True) -> Path:
+def build_stable_terrain_mask(
+    roi_path: Path = Path("shapes/region_of_interest.geojson"), verbose: bool = True
+) -> Path:
     """
     Build a stable terrain mask for the region of interest.
 
@@ -330,7 +364,7 @@ def build_stable_terrain_mask(roi_path: Path = Path("shapes/region_of_interest.g
     ----------
     roi_path
         The path to the region of interest shape. The total bounds are used to derive the bounds of the mask.
-    verbose: 
+    verbose:
         Whether to print updates to the console
 
     Returns
@@ -345,12 +379,18 @@ def build_stable_terrain_mask(roi_path: Path = Path("shapes/region_of_interest.g
         print(f"{now_time()}: Building stable terrain mask")
 
     crs = rio.CRS.from_epsg(CONSTANTS.crs_epsg)
-    
+
     roi = gpd.read_file(roi_path).to_crs(crs)
-    total_bounds = adsvalbard.utilities.align_bounds(rasterio.coords.BoundingBox(*roi.total_bounds), res=[CONSTANTS.res] * 2, half_mod=False)
+    total_bounds = adsvalbard.utilities.align_bounds(
+        rasterio.coords.BoundingBox(*roi.total_bounds),
+        res=[CONSTANTS.res] * 2,
+        half_mod=False,
+    )
 
     transform = adsvalbard.utilities.get_transform(total_bounds)
-    shape = adsvalbard.utilities.shape_from_bounds_res(total_bounds, [CONSTANTS.res] * 2)
+    shape = adsvalbard.utilities.shape_from_bounds_res(
+        total_bounds, [CONSTANTS.res] * 2
+    )
 
     outline_paths = adsvalbard.inputs.download_category("outlines")
 
@@ -364,9 +404,21 @@ def build_stable_terrain_mask(roi_path: Path = Path("shapes/region_of_interest.g
         .dissolve()
         .to_crs(crs)
     )
-    water = gpd.read_file(f"zip://{s100_path}!NP_S100_SHP/S100_Vann_f.shp").dissolve().to_crs(crs)
-    moraines = gpd.read_file(f"zip://{s100_path}!NP_S100_SHP/S100_Morener_f.shp").dissolve().to_crs(crs)
-    land = gpd.read_file(f"zip://{s100_path}!NP_S100_SHP/S100_Land_f.shp").dissolve().to_crs(crs)
+    water = (
+        gpd.read_file(f"zip://{s100_path}!NP_S100_SHP/S100_Vann_f.shp")
+        .dissolve()
+        .to_crs(crs)
+    )
+    moraines = (
+        gpd.read_file(f"zip://{s100_path}!NP_S100_SHP/S100_Morener_f.shp")
+        .dissolve()
+        .to_crs(crs)
+    )
+    land = (
+        gpd.read_file(f"zip://{s100_path}!NP_S100_SHP/S100_Land_f.shp")
+        .dissolve()
+        .to_crs(crs)
+    )
 
     stable = land.difference(geyman_1936.union(water).union(moraines))
     del geyman_1936
@@ -375,11 +427,13 @@ def build_stable_terrain_mask(roi_path: Path = Path("shapes/region_of_interest.g
     del land
     if verbose:
         print(f"{now_time()}: Loaded stable terrain features in memory")
-    rasterized = rasterio.features.rasterize(stable.geometry, out_shape=shape, transform=transform, default_value=1)
+    rasterized = rasterio.features.rasterize(
+        stable.geometry, out_shape=shape, transform=transform, default_value=1
+    )
 
     if verbose:
         print(f"{now_time()}: Rasterized features.")
-    
+
     out_filepath.parent.mkdir(exist_ok=True, parents=True)
     with rio.open(
         out_filepath,
@@ -398,4 +452,3 @@ def build_stable_terrain_mask(roi_path: Path = Path("shapes/region_of_interest.g
         print(f"{now_time()}: Saved {out_filepath.name}.")
 
     return out_filepath
-    

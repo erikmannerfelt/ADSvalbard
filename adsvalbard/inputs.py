@@ -8,7 +8,9 @@ from adsvalbard.constants import CONSTANTS
 
 
 def get_data_urls():
-    np_dem_base_url = "https://public.data.npolar.no/kartdata/S0_Terrengmodell/Delmodell/"
+    np_dem_base_url = (
+        "https://public.data.npolar.no/kartdata/S0_Terrengmodell/Delmodell/"
+    )
 
     urls = {
         "strip_metadata": [
@@ -74,7 +76,6 @@ def get_data_urls():
 
 
 def download_category(key: str) -> list[Path]:
-
     urls = get_data_urls()[key]
 
     finished = []
@@ -87,9 +88,10 @@ def download_category(key: str) -> list[Path]:
 
     if len(to_download) > 0:
         for url, filepath in tqdm(to_download, desc=f"Downloading {key}"):
-
             filepath.parent.mkdir(exist_ok=True, parents=True)
-            adsvalbard.utilities.download_large_file(url, filepath.name, filepath.parent)
+            adsvalbard.utilities.download_large_file(
+                url, filepath.name, filepath.parent
+            )
             finished.append(filepath)
 
     finished.sort()

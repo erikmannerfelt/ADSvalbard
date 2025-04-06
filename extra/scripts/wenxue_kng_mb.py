@@ -34,33 +34,51 @@ def nmad(data: np.ndarray, nfact: float = 1.4826) -> np.floating[Any]:
 
 
 def bin_data(filepath: Path) -> Path:
-
     out_path = filepath.with_stem("binned")
 
     if out_path.is_file():
         return out_path
 
     with xr.open_dataset(filepath, chunks={"time": 1, "y": -1, "x": -1}) as data:
-
         data["dh"] = data["ad_elevation"] - data["ref_dem"]
         data["stable_terrain"] = data["stable_terrain"] == 1
         data["rgi_mask"] = data["rgi_mask"] == 1
 
         data["ref_dem"].load()
-        min_height, max_height = data["ref_dem"].where(data["rgi_mask"]).quantile([0., 1.], dim=["y", "x"]).load().values
+        min_height, max_height = (
+            data["ref_dem"]
+            .where(data["rgi_mask"])
+            .quantile([0.0, 1.0], dim=["y", "x"])
+            .load()
+            .values
+        )
 
         n_bins = 10
-        approx_bin_size = np.round(((max_height - min_height) / n_bins) / 100) * 100.
+        approx_bin_size = np.round(((max_height - min_height) / n_bins) / 100) * 100.0
 
         bins = np.arange(min_height, max_height + approx_bin_size, step=approx_bin_size)
 
-        digitized = np.where(data["rgi_mask"], np.digitize(data["ref_dem"], bins=bins), -1)
+        digitized = np.where(
+            data["rgi_mask"], np.digitize(data["ref_dem"], bins=bins), -1
+        )
 
         counts = np.unique(digitized, return_counts=True)[1][1:]
         data["digitized"] = ("y", "x"), digitized
 
-        data["nmad"] = xr.apply_ufunc(nmad, data["dh"].where(data["stable_terrain"]), input_core_dims=[["y", "x"]], dask="parallelized", vectorize=True)
-        data["dh"] -= xr.apply_ufunc(np.nanmedian, data["dh"].where(data["stable_terrain"]), input_core_dims=[["y", "x"]], dask="parallelized", vectorize=True)
+        data["nmad"] = xr.apply_ufunc(
+            nmad,
+            data["dh"].where(data["stable_terrain"]),
+            input_core_dims=[["y", "x"]],
+            dask="parallelized",
+            vectorize=True,
+        )
+        data["dh"] -= xr.apply_ufunc(
+            np.nanmedian,
+            data["dh"].where(data["stable_terrain"]),
+            input_core_dims=[["y", "x"]],
+            dask="parallelized",
+            vectorize=True,
+        )
 
         binned = xr.DataArray(
             dask.array.empty(
@@ -68,19 +86,21 @@ def bin_data(filepath: Path) -> Path:
                 chunks=(1, bins.shape[0] - 1),
                 dtype="float32",
             ),
-            coords=[data["time"], ("z", bins[1:] - np.diff(bins) / 2)]
+            coords=[data["time"], ("z", bins[1:] - np.diff(bins) / 2)],
         ).to_dataset(name="dh_median")
 
         binned["nmad"] = data["nmad"]
         binned["area"] = "z", counts * (5 * 5)
 
         for col in ["dh_count", "dh_lower", "dh_upper"]:
-            binned[col] = ("time", "z"), dask.array.empty(
-                shape=(data["time"].shape[0], bins.shape[0] - 1),
-                chunks=(1, bins.shape[0] - 1),
-                dtype="int32" if "count" in col else "float32"
+            binned[col] = (
+                ("time", "z"),
+                dask.array.empty(
+                    shape=(data["time"].shape[0], bins.shape[0] - 1),
+                    chunks=(1, bins.shape[0] - 1),
+                    dtype="int32" if "count" in col else "float32",
+                ),
             )
-
 
         for i in range(1, len(bins)):
             bin_val = binned["z"].isel(z=i - 1).item()
@@ -88,18 +108,23 @@ def bin_data(filepath: Path) -> Path:
             dh_masked = data["dh"].where(data["digitized"] == i)
 
             binned["dh_median"].loc[{"z": bin_val}] = dh_masked.median(["y", "x"])
-            binned["dh_count"].loc[{"z": bin_val}] = (~dh_masked.isnull()).sum(["y", "x"])
+            binned["dh_count"].loc[{"z": bin_val}] = (~dh_masked.isnull()).sum(
+                ["y", "x"]
+            )
 
             quantiles = dh_masked.quantile([0.25, 0.75], ["y", "x"])
 
             for j, name in enumerate(["lower", "upper"]):
                 binned[f"dh_{name}"].loc[{"z": bin_val}] = quantiles.isel(quantile=j)
 
-
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir) / "binned.nc"
 
-            task = binned.to_netcdf(temp_path, encoding={v: {"zlib": True, "complevel": 5} for v in binned.data_vars}, compute=False)
+            task = binned.to_netcdf(
+                temp_path,
+                encoding={v: {"zlib": True, "complevel": 5} for v in binned.data_vars},
+                compute=False,
+            )
 
             with tqdm.dask.TqdmCallback(desc="Binning stack", smoothing=0.1):
                 task.compute()
@@ -107,7 +132,6 @@ def bin_data(filepath: Path) -> Path:
             shutil.move(temp_path, out_path)
 
     return out_path
-
 
 
 def main():
@@ -118,13 +142,11 @@ def main():
     rng: np.random.Generator = np.random.default_rng(seed=1)
 
     with xr.open_dataset(binned_path) as data:
-
         data.coords["year"] = data["time"].astype(int)
         total_area = data["area"].sum("z").item()
 
         iters = []
         for year, year_data in data.groupby("year"):
-
             half_shape = max(int(year_data["year"].shape[0] / 2), 3)
             min_combinations = math.comb(year_data["year"].shape[0], half_shape)
 
@@ -132,7 +154,14 @@ def main():
                 subset_i = rng.integers(0, year_data["year"].shape[0], size=half_shape)
                 year_data_sub = year_data.isel(time=subset_i)
 
-                smb = 0.85 * (year_data_sub["dh_median"].median("time") * year_data_sub["area"]).sum("z") / total_area
+                smb = (
+                    0.85
+                    * (
+                        year_data_sub["dh_median"].median("time")
+                        * year_data_sub["area"]
+                    ).sum("z")
+                    / total_area
+                )
 
                 iters.append({"year": year, "i": i, "smb": smb.item()})
 
@@ -161,16 +190,20 @@ def main():
 
         for suffix in ["_median", "_lower", "_upper"]:
             yearly[f"dv{suffix}"] = (yearly[f"dh{suffix}"] * yearly["area"]).sum("z")
-            yearly[f"smb{suffix}"] = (yearly[f"dv{suffix}"] / yearly["area"].sum("z")) * 0.85
+            yearly[f"smb{suffix}"] = (
+                yearly[f"dv{suffix}"] / yearly["area"].sum("z")
+            ) * 0.85
 
-        plt.fill_between(yearly["year"], yearly["smb_median"] - yearly["nmad"], yearly["smb_median"] + yearly["nmad"], alpha=0.3)
+        plt.fill_between(
+            yearly["year"],
+            yearly["smb_median"] - yearly["nmad"],
+            yearly["smb_median"] + yearly["nmad"],
+            alpha=0.3,
+        )
         yearly["smb_median"].plot()
         yearly["smb_median"].plot.scatter()
         plt.show()
 
 
-
-
 if __name__ == "__main__":
     main()
-    

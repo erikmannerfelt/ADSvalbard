@@ -36,22 +36,37 @@ def create_stack(region: str = "heerland") -> Path:
     import rasterio.coords
     import rioxarray
 
-    mask_stems = list(map(lambda fp: fp.stem.replace("_outlier_proba", ""), Path("temp.svalbard/outlier_proba/").glob("*/*.tif")))
+    mask_stems = list(
+        map(
+            lambda fp: fp.stem.replace("_outlier_proba", ""),
+            Path("temp.svalbard/outlier_proba/").glob("*/*.tif"),
+        )
+    )
 
-    dem_paths = list(filter(lambda fp: fp.stem in mask_stems, Path(f"temp.svalbard/{region}_dem_coreg/").glob("*/*dem_coreg.tif")))
-
+    dem_paths = list(
+        filter(
+            lambda fp: fp.stem in mask_stems,
+            Path(f"temp.svalbard/{region}_dem_coreg/").glob("*/*dem_coreg.tif"),
+        )
+    )
 
     bounds = CONSTANTS.regions[region]
     res = CONSTANTS.res
-    shape = adsvalbard.utilities.get_shape(rasterio.coords.BoundingBox(**bounds), [res] * 2)
+    shape = adsvalbard.utilities.get_shape(
+        rasterio.coords.BoundingBox(**bounds), [res] * 2
+    )
 
     xr_coords = {
-        "y": np.linspace(bounds["bottom"] + res / 2, bounds["top"] - res / 2, shape[0])[::-1],
+        "y": np.linspace(bounds["bottom"] + res / 2, bounds["top"] - res / 2, shape[0])[
+            ::-1
+        ],
         "x": np.linspace(bounds["left"] + res / 2, bounds["right"] - res / 2, shape[1]),
     }
 
-
-    dates = [(filepath, pd.to_datetime(filepath.stem.split("_")[3], format="%Y%m%d")) for filepath in dem_paths]
+    dates = [
+        (filepath, pd.to_datetime(filepath.stem.split("_")[3], format="%Y%m%d"))
+        for filepath in dem_paths
+    ]
     dates.sort(key=lambda tup: tup[1])
     # dems = xr.Dataset(coords=xr_coords)
 
@@ -60,47 +75,55 @@ def create_stack(region: str = "heerland") -> Path:
 
     dems = []
     for filepath, date in tqdm.tqdm(dates):
-        mask_path = filepath.parent.parent.parent / f"outlier_proba/{filepath.parent.stem}/{filepath.stem}_outlier_proba.tif"
+        mask_path = (
+            filepath.parent.parent.parent
+            / f"outlier_proba/{filepath.parent.stem}/{filepath.stem}_outlier_proba.tif"
+        )
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             dem = rioxarray.open_rasterio(filepath, chunks="auto")
             mask = rioxarray.open_rasterio(mask_path, chunks="auto")
 
+        mask = mask.isel(band=0).drop_vars(["band", "spatial_ref"])
 
-        mask = (
-            mask
-            .isel(band=0)
-            .drop_vars(["band", "spatial_ref"])
-
-        )
-        
         dem = (
-            dem
-            .isel(band=0)
-            .sel(x=slice(bounds["left"], bounds["right"]), y=slice(bounds["top"], bounds["bottom"]))
+            dem.isel(band=0)
+            .sel(
+                x=slice(bounds["left"], bounds["right"]),
+                y=slice(bounds["top"], bounds["bottom"]),
+            )
             .to_dataset(name="elevation")
             .drop_vars(["band", "spatial_ref"])
             .expand_dims(filename=[filepath.stem.replace("_dem_coreg", "")])
             .assign_coords(bounds=["xmin", "ymin", "xmax", "ymax"])
         )
         dem["elevation"].attrs = {}
-        dem["bounding_box"] = ("filename", "bounds"), [[dem["x"].min(), dem["y"].min(), dem["x"].max(), dem["y"].max()]]
+        dem["bounding_box"] = (
+            ("filename", "bounds"),
+            [[dem["x"].min(), dem["y"].min(), dem["x"].max(), dem["y"].max()]],
+        )
 
         with open(filepath.with_suffix(".json")) as infile:
             meta = json.load(infile)
 
-
         dem["stable_terrain_nmad"] = ("filename",), [meta["stable_nmad"]]
         dem["stable_terrain_frac"] = ("filename",), [meta["stable_fraction"]]
-        dem["approx_vshift"] = ("filename",), [meta["steps"][0]["meta"]["_meta"]["matrix"][-2][-1]]
+        dem["approx_vshift"] = (
+            ("filename",),
+            [meta["steps"][0]["meta"]["_meta"]["matrix"][-2][-1]],
+        )
         dem["date"] = ("filename",), [date]
 
         dem["outlier_proba"] = mask
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", category=PerformanceWarning)
-            dems.append(dem.reindex(xr_coords, fill_value={"outlier_proba": np.uint8(255)}).chunk(x=512, y=512))
+            dems.append(
+                dem.reindex(
+                    xr_coords, fill_value={"outlier_proba": np.uint8(255)}
+                ).chunk(x=512, y=512)
+            )
 
         # if len(dems) > 10:
         #     break
@@ -113,34 +136,46 @@ def create_stack(region: str = "heerland") -> Path:
             continue
         dems[key] = dems[key].chunk(filename=-1)
 
-
     for name in ["npi_mosaic.vrt", "npi_mosaic_years.vrt", "stable_terrain.tif"]:
         filepath = CONSTANTS.temp_dir / name
         key = filepath.stem.replace("_mosaic", "_dem")
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            data = rioxarray.open_rasterio(filepath, chunks="auto").isel(band=0).drop_vars(["band", "spatial_ref"])
+            data = (
+                rioxarray.open_rasterio(filepath, chunks="auto")
+                .isel(band=0)
+                .drop_vars(["band", "spatial_ref"])
+            )
 
         dems[key] = data.sel(**xr_coords).chunk(x=512, y=512)
 
-
-    task = dems.to_zarr(temp_path, encoding={key: {"compressor": zarr.Blosc(cname="zstd", clevel=5, shuffle=2)} for key in ["elevation", "outlier_proba"]}, compute=False)
+    task = dems.to_zarr(
+        temp_path,
+        encoding={
+            key: {"compressor": zarr.Blosc(cname="zstd", clevel=5, shuffle=2)}
+            for key in ["elevation", "outlier_proba"]
+        },
+        compute=False,
+    )
 
     with tqdm.dask.TqdmCallback(desc="Saving stack", smoothing=0.1):
         task.compute()
 
-
     shutil.move(temp_path, out_path)
 
     return out_path
-    
+
 
 def main():
-
     subsets = {
         "vallakra": {"xmin": 547000, "xmax": 554000, "ymin": 8640000, "ymax": 8648000},
-        "tinkarp": {"xmin": 548762.5, "ymin": 8656585, "xmax": 553272.5, "ymax": 8658480},
+        "tinkarp": {
+            "xmin": 548762.5,
+            "ymin": 8656585,
+            "xmax": 553272.5,
+            "ymax": 8658480,
+        },
     }
 
     stack_path = create_stack()
@@ -150,51 +185,111 @@ def main():
     glacier_name = "N Fredbreen"
     # glacier_name = "Tinkarpbreen"
 
-
     points = {
         "N Fredbreen": {
             "advancing_front": {"x": 545170, "y": 8626160},
-            "scheele": {"x": 545783, "y": 8626293, "desc": "Surge in 2021", "plot": True},
-            "trend0": {"x": 543317.5, "y": 8627532.5}, 
-            "trend1": {"x": 543312.5, "y": 8627532.5, "desc": "Slow surge", "plot": True} 
+            "scheele": {
+                "x": 545783,
+                "y": 8626293,
+                "desc": "Surge in 2021",
+                "plot": True,
+            },
+            "trend0": {"x": 543317.5, "y": 8627532.5},
+            "trend1": {
+                "x": 543312.5,
+                "y": 8627532.5,
+                "desc": "Slow surge",
+                "plot": True,
+            },
         },
         "Morsnevbreen": {
-            "tidewater_front": {"x": 563500, "y": 8612030, "desc": "Tidewater front advance", "plot": True},
-            "accumulation_area": {"x": 567018, "y": 8625060, "desc": "Acc. area during/post surge", "plot": True},
+            "tidewater_front": {
+                "x": 563500,
+                "y": 8612030,
+                "desc": "Tidewater front advance",
+                "plot": True,
+            },
+            "accumulation_area": {
+                "x": 567018,
+                "y": 8625060,
+                "desc": "Acc. area during/post surge",
+                "plot": True,
+            },
         },
         "Scheelebreen": {
-            "coast_point": {"x": 549063, "y": 8633541, "desc": "Near the coast", "plot": True},
-            "accumulation_area": {"x": 547717, "y": 8622038, "desc": "Accumulation area surge", "plot": True},
+            "coast_point": {
+                "x": 549063,
+                "y": 8633541,
+                "desc": "Near the coast",
+                "plot": True,
+            },
+            "accumulation_area": {
+                "x": 547717,
+                "y": 8622038,
+                "desc": "Accumulation area surge",
+                "plot": True,
+            },
         },
         "Vallåkrabreen": {
-            "surge_bulge": {"x": 549520, "y": 8643117, "desc": "Surge bulge evolution", "plot": True},
+            "surge_bulge": {
+                "x": 549520,
+                "y": 8643117,
+                "desc": "Surge bulge evolution",
+                "plot": True,
+            },
         },
         "Arnesenbreen": {
-            "accumulation_area": {"x": 572236, "y": 8635558, "desc": "Accumulation area surge", "plot": True},
+            "accumulation_area": {
+                "x": 572236,
+                "y": 8635558,
+                "desc": "Accumulation area surge",
+                "plot": True,
+            },
         },
         "Tinkarpbreen": {
-            "accumulation_area": {"x": 550486, "y": 8656975, "desc": "Accumulation area draining", "plot": True}
+            "accumulation_area": {
+                "x": 550486,
+                "y": 8656975,
+                "desc": "Accumulation area draining",
+                "plot": True,
+            }
         },
         "Klubbebreen": {
-            "slow_surge_front": {"x": 548960, "y": 8628312, "desc": "Slow-surge front", "plot": True},
+            "slow_surge_front": {
+                "x": 548960,
+                "y": 8628312,
+                "desc": "Slow-surge front",
+                "plot": True,
+            },
         },
         "Edvardbreen": {
-            "surge_bulge": {"x": 560374, "y": 8646527, "desc": "Surge bulge front", "plot": True},
+            "surge_bulge": {
+                "x": 560374,
+                "y": 8646527,
+                "desc": "Surge bulge front",
+                "plot": True,
+            },
         },
         "Kvalbreen": {
-            "retreat_then_surge": {"x": 569428, "y": 8610473, "desc": "Terminus retreat, then surge", "plot": True},
-
-        }
+            "retreat_then_surge": {
+                "x": 569428,
+                "y": 8610473,
+                "desc": "Terminus retreat, then surge",
+                "plot": True,
+            },
+        },
     }
 
     # points_to_plot = {"N Fredbreen": ["scheele", "trend1"], "Morsnevbreen": ["tidewater_front"], "Scheelebreen": ["coast_point"], "Vallåkrabreen": ["surge_bulge"], "Arnesenbreen": ["accumulation_area"]}
 
-    points_to_plot = {glac: {key: point for key, point in pts.items() if point.get("plot", False)} for glac, pts in points.items()}
+    points_to_plot = {
+        glac: {key: point for key, point in pts.items() if point.get("plot", False)}
+        for glac, pts in points.items()
+    }
 
     with xr.open_zarr(stack_path) as data:
-        data["elevation"] = data["elevation"].where(data["elevation"] != -9999.)
+        data["elevation"] = data["elevation"].where(data["elevation"] != -9999.0)
         data["outlier_proba"] = data["outlier_proba"].astype("float32") / 255
-
 
         n_panels = sum(len(point_dict.keys()) for point_dict in points_to_plot.values())
         n_rows = int(np.sqrt(n_panels))
@@ -220,21 +315,33 @@ def main():
             subset = data
 
             for point_key in points_to_plot[glacier_name]:
-
                 axis: plt.Axes = axes.ravel()[panel_i]
                 point_coord = points_to_plot[glacier_name][point_key]
-                point = subset.sel(x=point_coord["x"], y=point_coord["y"], method="nearest").compute()
+                point = subset.sel(
+                    x=point_coord["x"], y=point_coord["y"], method="nearest"
+                ).compute()
 
-                extreme_outliers = ((point["outlier_proba"] > 0.95) & (np.isfinite(point["elevation"])))# | (np.abs(point["elevation"] - point["elevation"].median("filename")) > 300)
+                extreme_outliers = (
+                    (point["outlier_proba"] > 0.95) & (np.isfinite(point["elevation"]))
+                )  # | (np.abs(point["elevation"] - point["elevation"].median("filename")) > 300)
 
                 point["elevation"] = point["elevation"].where(~extreme_outliers)
-                axis.scatter(point["date"], point["elevation"], c=point["outlier_proba"] * 100, zorder=2, vmin=50, vmax=100)
+                axis.scatter(
+                    point["date"],
+                    point["elevation"],
+                    c=point["outlier_proba"] * 100,
+                    zorder=2,
+                    vmin=50,
+                    vmax=100,
+                )
                 ylim = axis.get_ylim()
 
                 axis.set_ylim(ylim[0], ylim[1] + (ylim[1] - ylim[0]) * 0.1)
                 ylim = axis.get_ylim()
 
-                yticks = np.arange(ylim[0] - ylim[0] % 10, ylim[1] + 10, step=10).astype(int)
+                yticks = np.arange(
+                    ylim[0] - ylim[0] % 10, ylim[1] + 10, step=10
+                ).astype(int)
                 if yticks.shape[0] > 5:
                     axis.set_yticks(yticks, minor=True)
                     # print(list(filter(lambda i, tick: i % 3 == 0, enumerate(yticks)))
@@ -244,21 +351,52 @@ def main():
                 else:
                     axis.set_yticks(yticks)
 
-                axis.text(0.01, 0.99, s="abcdefghijklmnopq"[panel_i] + ")", transform=axis.transAxes, ha="left", va="top")
+                axis.text(
+                    0.01,
+                    0.99,
+                    s="abcdefghijklmnopq"[panel_i] + ")",
+                    transform=axis.transAxes,
+                    ha="left",
+                    va="top",
+                )
 
                 if "desc" in point_coord:
-                    axis.text(0.5, 0.99, s=f"{glacier_name}\n{point_coord['desc']}", transform=axis.transAxes, ha="center", va="top")
+                    axis.text(
+                        0.5,
+                        0.99,
+                        s=f"{glacier_name}\n{point_coord['desc']}",
+                        transform=axis.transAxes,
+                        ha="center",
+                        va="top",
+                    )
 
                 if (n_outliers := np.count_nonzero(extreme_outliers.values)) > 0:
-                    axis.text(0.99, 0.01, s=f"Hidden {n_outliers} extreme outlier(s)", transform=axis.transAxes, ha="right", va="bottom", fontsize=7)
+                    axis.text(
+                        0.99,
+                        0.01,
+                        s=f"Hidden {n_outliers} extreme outlier(s)",
+                        transform=axis.transAxes,
+                        ha="right",
+                        va="bottom",
+                        fontsize=7,
+                    )
 
                 axis.grid(which="both", color="lightgray", linestyle="--", zorder=1)
-                
 
                 panel_i += 1
 
-        plt.text(0.01, 0.5, "Elevation (m a.s.l.)", transform=fig.transFigure, rotation=90, va="center", ha="left")
-        plt.subplots_adjust(left=0.052, bottom=0.036, right=0.995, top=0.974, wspace=0.188, hspace=0.155)
+        plt.text(
+            0.01,
+            0.5,
+            "Elevation (m a.s.l.)",
+            transform=fig.transFigure,
+            rotation=90,
+            va="center",
+            ha="left",
+        )
+        plt.subplots_adjust(
+            left=0.052, bottom=0.036, right=0.995, top=0.974, wspace=0.188, hspace=0.155
+        )
         plt.savefig("figures/elevation_series_examples.jpg", dpi=600)
         # plt.tight_layout()
         plt.show()
@@ -267,10 +405,12 @@ def main():
 
         # for i, (glacier_name, point_key) in enumerate(points_to_plot):
 
-        
-
         poi_key = "scheele"
-        point = data.sel(x=[points[glacier_name][poi_key]["x"]], y=[points[glacier_name][poi_key]["y"]], method="nearest").isel(x=0, y=0)
+        point = data.sel(
+            x=[points[glacier_name][poi_key]["x"]],
+            y=[points[glacier_name][poi_key]["y"]],
+            method="nearest",
+        ).isel(x=0, y=0)
 
         plt.figure(dpi=200)
         plt.scatter(point["date"], point["elevation"], c=point["outlier_proba"] * 100)
@@ -284,19 +424,21 @@ def main():
 
         print(point)
 
-        data = data.sel(x=slice(bounds["xmin"], bounds["xmax"]), y=slice(bounds["ymax"], bounds["ymin"]))
+        data = data.sel(
+            x=slice(bounds["xmin"], bounds["xmax"]),
+            y=slice(bounds["ymax"], bounds["ymin"]),
+        )
 
         mask = (
-            (data["bounding_box"].sel(bounds="xmin") < data["x"].max()) &
-            (data["bounding_box"].sel(bounds="xmax") > data["x"].min()) &
-            (data["bounding_box"].sel(bounds="ymin") < data["y"].max()) &
-            (data["bounding_box"].sel(bounds="ymax") > data["y"].min())
+            (data["bounding_box"].sel(bounds="xmin") < data["x"].max())
+            & (data["bounding_box"].sel(bounds="xmax") > data["x"].min())
+            & (data["bounding_box"].sel(bounds="ymin") < data["y"].max())
+            & (data["bounding_box"].sel(bounds="ymax") > data["y"].min())
         )
         overlapping = mask["filename"].where(mask.compute(), drop=True)
         data = data.sel(filename=overlapping)
 
         # data["weight"] = 1 / (1 - data["outlier_proba"] ** 2)
-
 
         return
 
@@ -307,24 +449,33 @@ def main():
 
         # data["yearly_med_filt"] = data["yearly_med_filt"].where(enough_data)
 
-
-
-        data[["elevation", "outlier_proba"]] = data[["elevation", "outlier_proba"]].where((data["outlier_proba"] < 0.6))
-        data["elevation_count"] = data["elevation"].groupby(data["date"].dt.year).count()
-        enough_data = (data["elevation"].groupby(data["date"].dt.year).count() > 1)
+        data[["elevation", "outlier_proba"]] = data[
+            ["elevation", "outlier_proba"]
+        ].where((data["outlier_proba"] < 0.6))
+        data["elevation_count"] = (
+            data["elevation"].groupby(data["date"].dt.year).count()
+        )
+        enough_data = data["elevation"].groupby(data["date"].dt.year).count() > 1
         # data[["elevation", "outlier_proba"]] = data[["elevation", "outlier_proba"]].where((enough_data.sel(year=data["date"].dt.year)))
         data["yearly_med"] = data["elevation"].groupby(data["date"].dt.year).median()
 
         # data = data.assign_coords(date_yr=data["date"].dt.year + data["date"].dt.month / 12 + data["date"].dt.day / (12 * 30))
-        data["date_yr"] = data["date"].dt.year + data["date"].dt.month / 12 + data["date"].dt.day / (12 * 30)
-        data["yearly_med_date"] = data["date_yr"].load().groupby(data["date"].dt.year).median()
-
+        data["date_yr"] = (
+            data["date"].dt.year
+            + data["date"].dt.month / 12
+            + data["date"].dt.day / (12 * 30)
+        )
+        data["yearly_med_date"] = (
+            data["date_yr"].load().groupby(data["date"].dt.year).median()
+        )
 
         # data["yearly_med"] = data["yearly_med"].chunk(year=-1).interpolate_na("year").compute()
 
         data["diff"] = data["yearly_med"].diff("year").compute()
 
-        for panel_i, (year, yearly) in enumerate(data["diff"].groupby("year", squeeze=False)):
+        for panel_i, (year, yearly) in enumerate(
+            data["diff"].groupby("year", squeeze=False)
+        ):
             vals = yearly.values.squeeze()
 
             if np.count_nonzero(np.isfinite(vals)) == 0:
@@ -350,15 +501,9 @@ def main():
 
         # pred = xr.polyval(x_coords, data["polyfit"])
 
-
-
-
-        
         # def interp(point):
         #     point = point.resample(date=pd.Timedelta(days=120)).map(lambda ds: ds.weighted(ds["weight"]).mean("date"))
         #     point = point.dropna(subset=["elevation"])
-
-            
 
         #     print(point)
 
@@ -375,7 +520,6 @@ def main():
         #     .map(lambda ds: ds.weighted(ds["weight"]).mean(["date"]))
         # )
         # means["date_yr"] = means["date"].dt.year + means["date"].dt.month / 12 + means["date"].dt.day / (12 * 30)
-
 
         # data["year_dt"] = "year", pd.to_datetime(data["year"].astype(str).astype(object) + "-01-01", format="%Y-%m-%d")
         # print(data.sel(**points[glacier_name]["trend0"])["elevation_count"].load())
@@ -395,48 +539,50 @@ def main():
             if np.count_nonzero(valid_mask) == 0:
                 return np.zeros_like(years) + np.nan
 
-
             return scipy.interpolate.interp1d(times.ravel(), vals.ravel())(years)
-            
 
         # def interp_func(ds: xr.Dataset):
-            # years = np.arange(2013, 2022)
+        # years = np.arange(2013, 2022)
 
-            # ds = ds.dropna("date_yr", subset=["elevation"])
+        # ds = ds.dropna("date_yr", subset=["elevation"])
 
-            # res = xr.apply_ufunc(
-            #     interp_inner,
-            #     ds["elevation"],
-            #     kwargs=dict(times=ds["date_yr"]),
-            # )
+        # res = xr.apply_ufunc(
+        #     interp_inner,
+        #     ds["elevation"],
+        #     kwargs=dict(times=ds["date_yr"]),
+        # )
 
-            # return res
+        # return res
 
-            # ds.coords["year"] = "year", years
-            # ds["interp"] = "year", scipy.interpolate.interp1d(ds["date_yr"].values.ravel(), ds["elevation"].values.ravel())(years)
+        # ds.coords["year"] = "year", years
+        # ds["interp"] = "year", scipy.interpolate.interp1d(ds["date_yr"].values.ravel(), ds["elevation"].values.ravel())(years)
 
-            # return ds["interp"]
+        # return ds["interp"]
 
         import dask.array as da
 
-        def interp_inner(arr: da.Array, times: np.ndarray, orig_shape: tuple[int, ...], years: np.ndarray):
-
+        def interp_inner(
+            arr: da.Array,
+            times: np.ndarray,
+            orig_shape: tuple[int, ...],
+            years: np.ndarray,
+        ):
             valid_mask = da.isfinite(arr)
 
             if da.count_nonzero(valid_mask) < 2:
                 return da.zeros_like(years) + np.nan
 
-
-            model = scipy.interpolate.interp1d(times[valid_mask], arr[valid_mask], fill_value="extrapolate")
+            model = scipy.interpolate.interp1d(
+                times[valid_mask], arr[valid_mask], fill_value="extrapolate"
+            )
 
             return model(years)
 
         def interp_func(arr: da.Array, times: np.ndarray, years: np.ndarray):
-
             res = da.apply_along_axis(
                 interp_inner,
                 axis=1,
-                arr=arr.reshape((-1, arr.shape[-1])), 
+                arr=arr.reshape((-1, arr.shape[-1])),
                 orig_shape=arr.shape[:2],
                 times=times,
                 years=years,
@@ -445,12 +591,10 @@ def main():
 
             return res
 
-
         # interp = means.swap_dims(date="date_yr").stack(xy=["x", "y"])
 
         # interp = means.swap_dims(date="date_yr").stack(xy=["x", "y"]).compute().groupby("xy", squeeze=False).map(interp_func).unstack()
 
-        
         # subset_res = xr.apply_ufunc(
         #     get_poly,
         #     subset["d_h"],
@@ -497,7 +641,6 @@ def main():
 
         data["interp"] = interp
 
-
         with tqdm.dask.TqdmCallback():
             panel_i = data["interp"].compute().load()
 
@@ -505,12 +648,10 @@ def main():
 
         panel_i.sel(year=2022).plot()
         plt.show()
-        
-        # out = 
+
+        # out =
 
         return
-
-
 
         # print(point.swap_dims(filename="date").sortby("date").resample(date=pd.Timedelta(days=120)).map(lambda ds: ds.weighted(ds["weight"]).mean()))
         # return
@@ -519,8 +660,7 @@ def main():
         point.plot.scatter(x="date_yr", y="elevation", hue="outlier_proba")
         # print(point.swap_dims(filename="date").sortby("date").resample(date=pd.Timedelta(days=90)).mean())
         (
-            point
-            .swap_dims(filename="date")
+            point.swap_dims(filename="date")
             .resample(date=pd.Timedelta(days=120))
             .map(lambda ds: ds.weighted(ds["weight"]).mean())
             .plot.scatter(x="date_yr", y="elevation", color="black")
@@ -540,12 +680,17 @@ def main():
         # print(data)
         return
 
-
         # data = data.set_coords("date")
         # return
-        data["polyfit"] = data["elevation"].swap_dims(filename="date_yr").polyfit("date_yr", deg=1)["polyfit_coefficients"]
+        data["polyfit"] = (
+            data["elevation"]
+            .swap_dims(filename="date_yr")
+            .polyfit("date_yr", deg=1)["polyfit_coefficients"]
+        )
 
-        data["poly_nmad"] = xr.polyval(data["date_yr"], data["polyfit"]).median("filename")
+        data["poly_nmad"] = xr.polyval(data["date_yr"], data["polyfit"]).median(
+            "filename"
+        )
 
         data["poly_nmad"].plot()
         plt.show()
@@ -553,6 +698,5 @@ def main():
 
         # plt.hist(data["stable_terrain_nmad"], bins=50)
         # plt.show()
-        
-        # print(data)
 
+        # print(data)

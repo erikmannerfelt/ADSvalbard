@@ -15,6 +15,7 @@ from pathlib import Path
 
 import dask
 import dask.array as da
+
 # import dask.distributed
 import dask.dataframe as dd
 import geopandas as gpd
@@ -55,9 +56,19 @@ gdal.UseExceptions()
 REGION = "svalbard"
 
 GLACIERS = {
-    "dronbreen": {"bounds": [536837.5, 8667472.5, 544677.5, 8679002.5], "region": "nordenskiold"},
-    "tinkarp": {"bounds": [548762.5, 8655937.5, 553272.5, 8659162.5], "region": "nordenskiold"},
-    "kongsvegen": {"bounds": [445484, 8738240, 468300, 8757503], "region": "haakonvii", "rgi_id": "RGI2000-v7.0-G-07-00254"},
+    "dronbreen": {
+        "bounds": [536837.5, 8667472.5, 544677.5, 8679002.5],
+        "region": "nordenskiold",
+    },
+    "tinkarp": {
+        "bounds": [548762.5, 8655937.5, 553272.5, 8659162.5],
+        "region": "nordenskiold",
+    },
+    "kongsvegen": {
+        "bounds": [445484, 8738240, 468300, 8757503],
+        "region": "haakonvii",
+        "rgi_id": "RGI2000-v7.0-G-07-00254",
+    },
 }
 
 
@@ -76,7 +87,9 @@ def get_data_dir() -> Path:
 
 
 def get_data_urls():
-    np_dem_base_url = "https://public.data.npolar.no/kartdata/S0_Terrengmodell/Delmodell/"
+    np_dem_base_url = (
+        "https://public.data.npolar.no/kartdata/S0_Terrengmodell/Delmodell/"
+    )
 
     data_dir = get_data_dir()
 
@@ -147,8 +160,9 @@ def get_data_urls():
 
 
 def download_file(url: str, output_path: Path):
-
-    with requests.get(url, stream=True) as request, tempfile.TemporaryDirectory() as temp_dir:
+    with requests.get(
+        url, stream=True
+    ) as request, tempfile.TemporaryDirectory() as temp_dir:
         temp_file = Path(temp_dir).joinpath("file")
         if request.status_code != 200:
             raise ValueError(f"{request.status_code=} {request.content=}")
@@ -171,18 +185,22 @@ def align_bounds(
     buffer: float | None = None,
 ) -> rio.coords.BoundingBox:
     if isinstance(bounds, rio.coords.BoundingBox):
-        bounds = {key: getattr(bounds, key) for key in ["left", "bottom", "right", "top"]}
+        bounds = {
+            key: getattr(bounds, key) for key in ["left", "bottom", "right", "top"]
+        }
 
     if res is None:
         res = get_res()
     # Ensure that the moduli of the bounds are zero
     for i, bound0 in enumerate([["left", "right"], ["bottom", "top"]]):
         for j, bound in enumerate(bound0):
-
             mod = (bounds[bound] - (res[i] / 2 if half_mod else 0)) % res[i]
 
             bounds[bound] = (
-                bounds[bound] - mod + (res[i] if i > 0 and mod != 0 else 0) + ((buffer or 0) * (1 if i > 0 else -1))
+                bounds[bound]
+                - mod
+                + (res[i] if i > 0 and mod != 0 else 0)
+                + ((buffer or 0) * (1 if i > 0 else -1))
             )
 
     return rio.coords.BoundingBox(**bounds)
@@ -211,13 +229,37 @@ def get_bounds(
     """
 
     if region != "svalbard":
-
         region_bounds = {
-            "svalbard": {"left": 341002.5, "bottom": 8455002.5, "right": 905002.5, "top": 8982002.5},
-            "nordenskiold": {"left": 443002.5, "bottom": 8626007.5, "right": 560242.5, "top": 8703007.5},
-            "heerland": {"left": 537010, "bottom": 8602780, "right": 582940, "top": 8656400},
-            "kongsvegen": {"left": 438960, "bottom": 8735190, "right": 470420, "top": 8764230},
-            "haakonvii": {"left": 412970, "bottom": 8689380, "right": 495820, "top": 8837790}
+            "svalbard": {
+                "left": 341002.5,
+                "bottom": 8455002.5,
+                "right": 905002.5,
+                "top": 8982002.5,
+            },
+            "nordenskiold": {
+                "left": 443002.5,
+                "bottom": 8626007.5,
+                "right": 560242.5,
+                "top": 8703007.5,
+            },
+            "heerland": {
+                "left": 537010,
+                "bottom": 8602780,
+                "right": 582940,
+                "top": 8656400,
+            },
+            "kongsvegen": {
+                "left": 438960,
+                "bottom": 8735190,
+                "right": 470420,
+                "top": 8764230,
+            },
+            "haakonvii": {
+                "left": 412970,
+                "bottom": 8689380,
+                "right": 495820,
+                "top": 8837790,
+            },
         }
 
         bounds = region_bounds[region]
@@ -228,7 +270,9 @@ def get_bounds(
     roi_path = Path("shapes/region_of_interest.geojson")
     roi = gpd.read_file(roi_path).to_crs(crs)
     res = get_res()
-    return adsvalbard.utilities.align_bounds(rasterio.coords.BoundingBox(*roi.total_bounds), res=res, half_mod=False)
+    return adsvalbard.utilities.align_bounds(
+        rasterio.coords.BoundingBox(*roi.total_bounds), res=res, half_mod=False
+    )
 
 
 def get_temp_dir(label: str = REGION) -> Path:
@@ -240,7 +284,6 @@ def get_temp_dir(label: str = REGION) -> Path:
 
 
 def get_strips() -> gpd.GeoDataFrame:
-
     temp_dir = get_temp_dir()
 
     output_path = temp_dir.joinpath("strip-meta.feather")
@@ -250,11 +293,17 @@ def get_strips() -> gpd.GeoDataFrame:
 
     bounds = get_bounds()
     crs = get_crs()
-    bounds_wgs = gpd.GeoSeries(shapely.geometry.box(*list(bounds)), crs=get_crs()).to_crs(4326).total_bounds
+    bounds_wgs = (
+        gpd.GeoSeries(shapely.geometry.box(*list(bounds)), crs=get_crs())
+        .to_crs(4326)
+        .total_bounds
+    )
 
-    #meta_url, filepath = get_data_urls()["strip_metadata"][0])
+    # meta_url, filepath = get_data_urls()["strip_metadata"][0])
 
-    meta_url, filepath = [v for v in get_data_urls()["strip_metadata"] if "geocell_metadata" in str(v[1])][0]
+    meta_url, filepath = [
+        v for v in get_data_urls()["strip_metadata"] if "geocell_metadata" in str(v[1])
+    ][0]
 
     if not filepath.is_file():
         filepath.parent.mkdir(exist_ok=True, parents=True)
@@ -268,7 +317,9 @@ def get_strips() -> gpd.GeoDataFrame:
     data["title"] = data["title"].str.replace("Geocell ", "")
 
     data["lat"] = data["title"].str.slice(1, 3).astype(int)
-    data["lon"] = data["title"].str.slice(4, 7).astype(int) * ((data["title"].str.slice(-4, -3) == "e") * 2 - 1)
+    data["lon"] = data["title"].str.slice(4, 7).astype(int) * (
+        (data["title"].str.slice(-4, -3) == "e") * 2 - 1
+    )
     data = data[
         (data["lon"] >= np.floor(bounds_wgs[0]))
         & (data["lon"] <= np.ceil(bounds_wgs[2]))
@@ -278,7 +329,6 @@ def get_strips() -> gpd.GeoDataFrame:
 
     cell_files = []
     for _, row in data.iterrows():
-
         cell_filepath = filepath.parent.joinpath(os.path.basename(row["href"]))
         if not cell_filepath.is_file():
             response = requests.get(row["href"])
@@ -290,7 +340,9 @@ def get_strips() -> gpd.GeoDataFrame:
                 outfile.write(response.content)
 
         with open(cell_filepath) as infile:
-            files = pd.DataFrame.from_records(json.load(infile)["links"])[["title", "href"]]
+            files = pd.DataFrame.from_records(json.load(infile)["links"])[
+                ["title", "href"]
+            ]
             files = files[files["title"].str.contains("SETSM")]
             cell_files.append(files)
 
@@ -325,7 +377,6 @@ def get_strips() -> gpd.GeoDataFrame:
             progress_bar.update()
 
     if len(infos) > 0:
-
         # for info in tqdm(infos, desc="Downloading metadata"):
         #    download(info)
 
@@ -334,7 +385,6 @@ def get_strips() -> gpd.GeoDataFrame:
                 list(executor.map(lambda i: download(i, progress_bar), infos))
 
     def load(strip_filepath):
-
         with open(strip_filepath) as infile:
             data = json.load(infile)
 
@@ -345,15 +395,23 @@ def get_strips() -> gpd.GeoDataFrame:
 
         out["geometry"] = data["geometry"]
         self_link = [l for l in data["links"] if l["rel"] == "self"][0]
-        out["dem"] = os.path.join(os.path.dirname(self_link["href"]), data["assets"]["dem"]["href"][2:])
-        out["matchtag"] = os.path.join(os.path.dirname(self_link["href"]), data["assets"]["matchtag"]["href"][2:])
+        out["dem"] = os.path.join(
+            os.path.dirname(self_link["href"]), data["assets"]["dem"]["href"][2:]
+        )
+        out["matchtag"] = os.path.join(
+            os.path.dirname(self_link["href"]), data["assets"]["matchtag"]["href"][2:]
+        )
 
         return out
 
     strips = gpd.GeoDataFrame.from_records([load(fp) for fp in filepaths])
-    strips = strips.set_geometry(strips["geometry"].apply(shapely.geometry.shape), crs=CRS.from_epsg(4326))
+    strips = strips.set_geometry(
+        strips["geometry"].apply(shapely.geometry.shape), crs=CRS.from_epsg(4326)
+    )
     # strips.crs = CRS.from_epsg(4326)
-    strips["geometry"] = gpd.GeoSeries.from_wkb(strips["geometry"].to_wkb(output_dimension=2))
+    strips["geometry"] = gpd.GeoSeries.from_wkb(
+        strips["geometry"].to_wkb(output_dimension=2)
+    )
     strips = strips.to_crs(crs)
 
     for col in ["pgc:image_ids", "pgc:avg_sun_elevs", "instruments"]:
@@ -381,7 +439,6 @@ def download_arcticdem(dem_data: pd.Series, verbose: bool = True):
             with requests.get(dem_data[kind], stream=True, timeout=30) as request:
                 request.raise_for_status()
                 with tempfile.TemporaryDirectory() as temp_dir:
-
                     temp_path = Path(temp_dir).joinpath("temp.tif")
                     with open(temp_path, "wb") as outfile:
                         shutil.copyfileobj(request.raw, outfile)
@@ -395,13 +452,17 @@ def download_arcticdem(dem_data: pd.Series, verbose: bool = True):
 
 def get_xdem_dem_co() -> dict[str, str]:
     """Get DEM creation options for xdem."""
-    return {"COMPRESS": "DEFLATE", "ZLEVEL": "12", "TILED": "YES", "NUM_THREADS": "ALL_CPUS"}
+    return {
+        "COMPRESS": "DEFLATE",
+        "ZLEVEL": "12",
+        "TILED": "YES",
+        "NUM_THREADS": "ALL_CPUS",
+    }
 
 
 def get_dem_co() -> list[str]:
     """Get DEM creation options for GDAL."""
     return [f"{k}={v}" for k, v in get_xdem_dem_co().items()]
-
 
 
 def get_transform(res: tuple[float, float] | None = None) -> rio.Affine:
@@ -440,7 +501,10 @@ def get_shape(res: tuple[float, float] | None = None) -> tuple[int, int]:
 
     bounds = get_bounds(res=res)
 
-    return (int((bounds.top - bounds.bottom) / res[1]), int((bounds.right - bounds.left) / res[0]))
+    return (
+        int((bounds.top - bounds.bottom) / res[1]),
+        int((bounds.right - bounds.left) / res[0]),
+    )
 
 
 def build_stable_terrain_mask_old(region: str = REGION, verbose: bool = False) -> Path:
@@ -477,21 +541,39 @@ def build_stable_terrain_mask_old(region: str = REGION, verbose: bool = False) -
     crs = get_crs()
 
     geyman_1936 = (
-        gpd.read_file(f"zip://{data_dir}/GAO_SfM_1936_1938.zip!GAO_SfM_1936_1938_v3.shp")
+        gpd.read_file(
+            f"zip://{data_dir}/GAO_SfM_1936_1938.zip!GAO_SfM_1936_1938_v3.shp"
+        )
         .buffer(0)
         .to_frame()
         .dissolve()
         .to_crs(crs)
     )
-    water = gpd.read_file(f"zip://{data_dir}/NP_S100_SHP.zip!NP_S100_SHP/S100_Vann_f.shp").dissolve().to_crs(crs)
-    moraines = gpd.read_file(f"zip://{data_dir}/NP_S100_SHP.zip!NP_S100_SHP/S100_Morener_f.shp").dissolve().to_crs(crs)
-    land = gpd.read_file(f"zip://{data_dir}/NP_S100_SHP.zip!NP_S100_SHP/S100_Land_f.shp").dissolve().to_crs(crs)
+    water = (
+        gpd.read_file(f"zip://{data_dir}/NP_S100_SHP.zip!NP_S100_SHP/S100_Vann_f.shp")
+        .dissolve()
+        .to_crs(crs)
+    )
+    moraines = (
+        gpd.read_file(
+            f"zip://{data_dir}/NP_S100_SHP.zip!NP_S100_SHP/S100_Morener_f.shp"
+        )
+        .dissolve()
+        .to_crs(crs)
+    )
+    land = (
+        gpd.read_file(f"zip://{data_dir}/NP_S100_SHP.zip!NP_S100_SHP/S100_Land_f.shp")
+        .dissolve()
+        .to_crs(crs)
+    )
 
     stable = land.difference(geyman_1936.union(water).union(moraines))
     if verbose:
         print(f"{now_time()}: Loaded stable terrain features in memory")
 
-    rasterized = rasterio.features.rasterize(stable.geometry, out_shape=shape, transform=transform, default_value=1)
+    rasterized = rasterio.features.rasterize(
+        stable.geometry, out_shape=shape, transform=transform, default_value=1
+    )
     if verbose:
         print(f"{now_time()}: Rasterized features.")
 
@@ -516,7 +598,10 @@ def build_stable_terrain_mask_old(region: str = REGION, verbose: bool = False) -
 
 
 def create_warped_vrt(
-    filepath: Path | str, vrt_filepath: Path | str, out_crs: str | CRS, in_crs: str | CRS | None = None
+    filepath: Path | str,
+    vrt_filepath: Path | str,
+    out_crs: str | CRS,
+    in_crs: str | CRS | None = None,
 ) -> None:
     """
     Create a warped VRT from a raster with a different CRS.
@@ -533,15 +618,18 @@ def create_warped_vrt(
     if isinstance(in_crs, CRS):
         in_crs = in_crs.to_wkt()
 
-    vrt = gdal.AutoCreateWarpedVRT(ds, in_crs, out_crs, rasterio.warp.Resampling.bilinear)
+    vrt = gdal.AutoCreateWarpedVRT(
+        ds, in_crs, out_crs, rasterio.warp.Resampling.bilinear
+    )
     vrt.GetDriver().CreateCopy(str(vrt_filepath), vrt)
 
     del ds
     del vrt
 
 
-
-def build_npi_mosaic_old(region: str = REGION, verbose: bool = False) -> tuple[Path, Path]:
+def build_npi_mosaic_old(
+    region: str = REGION, verbose: bool = False
+) -> tuple[Path, Path]:
     """
     Build a mosaic of tiles downloaded from the NPI.
 
@@ -569,36 +657,56 @@ def build_npi_mosaic_old(region: str = REGION, verbose: bool = False) -> tuple[P
     res = get_res()
     bounds = get_bounds(res=res)
 
-    bounds_epsg25833 = shapely.geometry.box(*gpd.GeoSeries([shapely.geometry.box(*bounds)], crs=32633).to_crs(25833).buffer(50).total_bounds)
+    bounds_epsg25833 = shapely.geometry.box(
+        *gpd.GeoSeries([shapely.geometry.box(*bounds)], crs=32633)
+        .to_crs(25833)
+        .buffer(50)
+        .total_bounds
+    )
 
     # Generate links to the DEM tiles within their zipfiles
     uris = []
     year_rasters = []
-    for url, filepath in tqdm(get_data_urls()["NP_DEMs"], desc="Preparing DEMs and year info", disable=(not verbose)):
+    for url, filepath in tqdm(
+        get_data_urls()["NP_DEMs"],
+        desc="Preparing DEMs and year info",
+        disable=(not verbose),
+    ):
         year = int(filepath.stem.split("_")[3])
 
         if not filepath.is_file():
             filepath.parent.mkdir(parents=True, exist_ok=True)
             download_file(url, filepath)
 
-        uri = f"/vsizip/{filepath}/{filepath.stem}/{filepath.stem.replace('NP_', '')}.tif"
+        uri = (
+            f"/vsizip/{filepath}/{filepath.stem}/{filepath.stem.replace('NP_', '')}.tif"
+        )
 
         dem = xdem.DEM(uri, load_data=False)
 
         dem_bbox = shapely.geometry.box(*dem.bounds)
         if not bounds_epsg25833.overlaps(dem_bbox):
             # TODO: Figure out why 13822 doesn't work with Kongsvegen...
-            if inspect.signature(get_bounds).parameters["region"].default in ["kongsvegen", "haakonvii"] and "13822" in filepath.stem:
+            if (
+                inspect.signature(get_bounds).parameters["region"].default
+                in ["kongsvegen", "haakonvii"]
+                and "13822" in filepath.stem
+            ):
                 pass
-            elif inspect.signature(get_bounds).parameters["region"].default in ["haakonvii"] and "13828" in filepath.stem:
+            elif (
+                inspect.signature(get_bounds).parameters["region"].default
+                in ["haakonvii"]
+                and "13828" in filepath.stem
+            ):
                 pass
             else:
                 continue
 
         dem.crop(bounds_epsg25833.bounds)
-       
+
         year_raster = gu.Raster.from_array(
-            (np.zeros(dem.shape, dtype="uint16") + year) * (1 - dem.data.mask.astype("uint16")),
+            (np.zeros(dem.shape, dtype="uint16") + year)
+            * (1 - dem.data.mask.astype("uint16")),
             transform=dem.transform,
             crs=dem.crs,
             nodata=0,
@@ -609,11 +717,13 @@ def build_npi_mosaic_old(region: str = REGION, verbose: bool = False) -> tuple[P
 
     if verbose:
         print("Merging rasters")
-    year_raster = gu.raster.merge_rasters(year_rasters, merge_algorithm=np.nanmax, resampling_method="nearest")
-
-    year_raster.reproject(dst_bounds=bounds, dst_res=res, dst_crs=crs, resampling="nearest").save(
-        output_year_path, tiled=True, compress="lzw"
+    year_raster = gu.raster.merge_rasters(
+        year_rasters, merge_algorithm=np.nanmax, resampling_method="nearest"
     )
+
+    year_raster.reproject(
+        dst_bounds=bounds, dst_res=res, dst_crs=crs, resampling="nearest"
+    ).save(output_year_path, tiled=True, compress="lzw")
     del year_raster
 
     vrt_dir = temp_dir.joinpath("npi_vrts/")
@@ -663,7 +773,9 @@ def prepare_mask(filepath: Path) -> np.ndarray:
         raise ValueError("Mask is empty")
 
     # Dilate the mask (expand the excluded areas)
-    struct = scipy.ndimage.iterate_structure(scipy.ndimage.generate_binary_structure(2, 1), 3)
+    struct = scipy.ndimage.iterate_structure(
+        scipy.ndimage.generate_binary_structure(2, 1), 3
+    )
     outlier_mask = scipy.ndimage.binary_dilation(outlier_mask.squeeze(), struct)
 
     # Label each connected inlier component
@@ -675,7 +787,9 @@ def prepare_mask(filepath: Path) -> np.ndarray:
     unique = unique[unique != 0]
     # Create a new mask which is False (inliers) for all patches that are larger than 1% of the largest patch
     # All small patches and the previous outliers are True (outliers)
-    outlier_mask = np.isin(labelled, unique[counts > int(counts[np.argmax(counts)] * 0.01)], invert=True)
+    outlier_mask = np.isin(
+        labelled, unique[counts > int(counts[np.argmax(counts)] * 0.01)], invert=True
+    )
 
     return outlier_mask
 
@@ -712,23 +826,38 @@ def prepare_arcticdem(dem_path: Path) -> tuple[Path, Path]:
 
         if i == 0:
             with rio.open(filepath) as raster:
-
                 # Read the mask of overview level 8 if it exists. Otherwise the second overview, or worst, no overview
                 overviews = raster.overviews(1)
                 overview_level = 8 if 8 in overviews else overviews.get(2, 1)
-                mask = raster.read_masks(1, out_shape=(int(raster.height / overview_level), int(raster.width / overview_level)))
+                mask = raster.read_masks(
+                    1,
+                    out_shape=(
+                        int(raster.height / overview_level),
+                        int(raster.width / overview_level),
+                    ),
+                )
 
                 # Generate approximate coordinates of the pixels in the wrong CRS
-                coords = np.array(np.meshgrid(
-                    np.linspace(raster.bounds.left, raster.bounds.right, mask.shape[1]),
-                    np.linspace(raster.bounds.bottom, raster.bounds.top, mask.shape[0])[::-1],
-                ))
+                coords = np.array(
+                    np.meshgrid(
+                        np.linspace(
+                            raster.bounds.left, raster.bounds.right, mask.shape[1]
+                        ),
+                        np.linspace(
+                            raster.bounds.bottom, raster.bounds.top, mask.shape[0]
+                        )[::-1],
+                    )
+                )
 
                 # Convert the coordinates to the right CRS and mask them to all data pixels only
-                coords = gpd.points_from_xy(*coords.reshape((2, -1)).T[mask.ravel() > 0].T, crs=raster.crs).to_crs(crs)
+                coords = gpd.points_from_xy(
+                    *coords.reshape((2, -1)).T[mask.ravel() > 0].T, crs=raster.crs
+                ).to_crs(crs)
 
                 # Find the smallest "right CRS" bounds of the unmasked pixels in the raster
-                warp_bounds = align_bounds(rio.coords.BoundingBox(*coords.total_bounds), res=res, buffer=res[0])
+                warp_bounds = align_bounds(
+                    rio.coords.BoundingBox(*coords.total_bounds), res=res, buffer=res[0]
+                )
 
             # Intersect the smallest available bounds with the total bounds of the domain
             bounds = rio.coords.BoundingBox(
@@ -804,12 +933,17 @@ def coregister(dem_path: Path, verbose: bool = True):
         print(f"\t{now_time()}: Loaded TBA DEM")
 
     stable_terrain_path = build_stable_terrain_mask(verbose=verbose)
-    stable_terrain_mask = gu.Raster(str(stable_terrain_path), load_data=False).crop(tba_dem, inplace=False)
+    stable_terrain_mask = gu.Raster(str(stable_terrain_path), load_data=False).crop(
+        tba_dem, inplace=False
+    )
     stable_terrain_mask = stable_terrain_mask.data.filled(0) == 1
 
     if np.count_nonzero(stable_terrain_mask) == 0:
         raise ValueError("No stable terrain pixels in window")
-    if np.count_nonzero(np.isfinite(tba_dem.data.filled(np.nan)[stable_terrain_mask])) == 0:
+    if (
+        np.count_nonzero(np.isfinite(tba_dem.data.filled(np.nan)[stable_terrain_mask]))
+        == 0
+    ):
         raise ValueError("No overlapping stable terrain")
     if verbose:
         print(f"\t{now_time()}: Loaded stable terrain mask")
@@ -817,7 +951,9 @@ def coregister(dem_path: Path, verbose: bool = True):
     del mask
 
     npi_mosaic_path, _ = build_npi_mosaic(verbose=verbose)
-    ref_dem = gu.Raster(str(npi_mosaic_path), load_data=False).crop(tba_dem, inplace=False)
+    ref_dem = gu.Raster(str(npi_mosaic_path), load_data=False).crop(
+        tba_dem, inplace=False
+    )
     if verbose:
         print(f"\t{now_time()}: Loaded ref. DEM. Running co-registration")
     if np.count_nonzero(np.isfinite(ref_dem.data.filled(np.nan))) == 0:
@@ -838,7 +974,10 @@ def coregister(dem_path: Path, verbose: bool = True):
     for part in coreg.pipeline:
         metadata["steps"].append(
             {
-                "name": re.search(r"coreg.*'", str(part.__class__)).group().replace("'", "").replace("coreg.", ""),
+                "name": re.search(r"coreg.*'", str(part.__class__))
+                .group()
+                .replace("'", "")
+                .replace("coreg.", ""),
                 "meta": part.__dict__,
             }
         )
@@ -847,12 +986,18 @@ def coregister(dem_path: Path, verbose: bool = True):
         print(f"\t{now_time()}: Finished co-registration. Transforming DEM")
     tba_dem = coreg.apply(tba_dem)
 
-    diff = tba_dem.data[stable_terrain_mask].filled(np.nan) - ref_dem.data[stable_terrain_mask].filled(np.nan)
+    diff = tba_dem.data[stable_terrain_mask].filled(np.nan) - ref_dem.data[
+        stable_terrain_mask
+    ].filled(np.nan)
     metadata["stable_nmad"] = float(xdem.spatialstats.nmad(diff))
     metadata["stable_bias"] = float(np.nanmedian(diff))
-    metadata["stable_fraction"] = float(np.count_nonzero(stable_terrain_mask) / np.prod(stable_terrain_mask.shape))
+    metadata["stable_fraction"] = float(
+        np.count_nonzero(stable_terrain_mask) / np.prod(stable_terrain_mask.shape)
+    )
     metadata["pixel_count"] = int(np.count_nonzero(np.isfinite(tba_dem.data)))
-    metadata["bounds"] = {b: float(getattr(tba_dem.bounds, b)) for b in ["left", "bottom", "right", "top"]}
+    metadata["bounds"] = {
+        b: float(getattr(tba_dem.bounds, b)) for b in ["left", "bottom", "right", "top"]
+    }
     metadata["crs"] = f"EPSG:{tba_dem.crs.to_epsg()}"
 
     with open(out_meta, "w") as outfile:
@@ -870,7 +1015,6 @@ def coregister(dem_path: Path, verbose: bool = True):
 
 
 def generate_difference(dem_path: Path, verbose: bool = False):
-
     date = pd.to_datetime(dem_path.stem.split("_")[3], format="%Y%m%d")
     temp_dir = get_temp_dir()
     dh_dir = temp_dir.joinpath(f"dh/{date.year}")
@@ -890,7 +1034,11 @@ def generate_difference(dem_path: Path, verbose: bool = False):
 
     npi_mosaic_path, npi_mosaic_years_path = build_npi_mosaic(verbose=verbose)
     npi_dem = xdem.DEM(str(npi_mosaic_path), load_data=False).crop(dem, inplace=False)
-    npi_dem_years = xdem.DEM(str(npi_mosaic_years_path), load_data=False).crop(dem, inplace=False).astype("float32")
+    npi_dem_years = (
+        xdem.DEM(str(npi_mosaic_years_path), load_data=False)
+        .crop(dem, inplace=False)
+        .astype("float32")
+    )
     # Assume that it's the 1st of August of every year
     npi_dem_years += 8 / 12
 
@@ -913,7 +1061,6 @@ def generate_difference(dem_path: Path, verbose: bool = False):
 
 
 def median_stack():
-
     temp_dir = get_temp_dir()
     dh_dir = temp_dir.joinpath("dh")
 
@@ -926,7 +1073,6 @@ def median_stack():
 
     filepaths = list(dh_dir.glob("*_dh.tif"))
     for filepath in tqdm(filepaths):
-
         date = pd.to_datetime(filepath.stem.split("_")[3], format="%Y%m%d")
 
         # if date.year < 2020:
@@ -941,7 +1087,9 @@ def median_stack():
 
             dhs.append(
                 np.clip(
-                    raster.read(1, window=window, masked=True, boundless=True, fill_value=-9999).filled(np.nan)
+                    raster.read(
+                        1, window=window, masked=True, boundless=True, fill_value=-9999
+                    ).filled(np.nan)
                     / year_diff,
                     -4,
                     4,
@@ -972,17 +1120,22 @@ def median_stack():
     plt.show()
 
 
-def big_median_stack(years: int | list[int] | None = 2021, n_threads: int | None = None, raster_type: str = "dhdt", verbose: bool = True, write_in_mem: bool = False):
+def big_median_stack(
+    years: int | list[int] | None = 2021,
+    n_threads: int | None = None,
+    raster_type: str = "dhdt",
+    verbose: bool = True,
+    write_in_mem: bool = False,
+):
     temp_dir = get_temp_dir()
 
     if raster_type == "dhdt":
         raster_dir = temp_dir.joinpath("dhdt")
     elif raster_type == "dem":
         raster_dir = temp_dir.joinpath("arcticdem_coreg")
-        
-    else:
-        raise NotImplementedError(f"Unknown raster type: {raster_type}") 
 
+    else:
+        raise NotImplementedError(f"Unknown raster type: {raster_type}")
 
     if years is None:
         ext = ""
@@ -1009,9 +1162,14 @@ def big_median_stack(years: int | list[int] | None = 2021, n_threads: int | None
         v_clip = 1500
         pattern = "*_dem_coreg.tif"
     else:
-        raise NotImplementedError(f"Unknown raster type: {raster_type}") 
-        
-    raster_files = list(filter(lambda fp: int(fp.stem.split("_")[3][:4]) in years, raster_dir.rglob(pattern)))
+        raise NotImplementedError(f"Unknown raster type: {raster_type}")
+
+    raster_files = list(
+        filter(
+            lambda fp: int(fp.stem.split("_")[3][:4]) in years,
+            raster_dir.rglob(pattern),
+        )
+    )
 
     if output_path.is_file():
         return output_path
@@ -1026,8 +1184,9 @@ def big_median_stack(years: int | list[int] | None = 2021, n_threads: int | None
 
     strips = get_strips()
 
-
-    titles = {r_path.stem[: r_path.stem.index("_seg") + 5]: r_path for r_path in raster_files}
+    titles = {
+        r_path.stem[: r_path.stem.index("_seg") + 5]: r_path for r_path in raster_files
+    }
 
     locks = {path: threading.Lock() for path in titles.values()}
 
@@ -1044,7 +1203,9 @@ def big_median_stack(years: int | list[int] | None = 2021, n_threads: int | None
 
             win_bounds = rio.windows.bounds(window, transform=transform)
 
-            overlapping_strips = strips[strips.intersects(shapely.geometry.box(*win_bounds))]
+            overlapping_strips = strips[
+                strips.intersects(shapely.geometry.box(*win_bounds))
+            ]
 
             paths = []
             for title in overlapping_strips["title"].values:
@@ -1076,17 +1237,17 @@ def big_median_stack(years: int | list[int] | None = 2021, n_threads: int | None
     )
 
     with contextlib.ExitStack() as stack:
-        
         if write_in_mem:
             stack = np.zeros(shape, dtype="float32") - 9999
         else:
             out_raster = stack.enter_context(rio.open(temp_path, "w", **write_params))
-            
 
         def process(
-            window_info: list[dict[str, rio.windows.Window | tuple[Path, threading.Lock]]], progress_bar: tqdm | None = None
+            window_info: list[
+                dict[str, rio.windows.Window | tuple[Path, threading.Lock]]
+            ],
+            progress_bar: tqdm | None = None,
         ) -> None:
-
             window: rio.windows.Window = window_info["window"]
             window_bounds = rio.windows.bounds(window, transform)
 
@@ -1095,11 +1256,15 @@ def big_median_stack(years: int | list[int] | None = 2021, n_threads: int | None
             for path, lock in window_info["paths"]:
                 with lock:
                     with rio.open(path) as raster:
-                        raster_win = rio.windows.from_bounds(*window_bounds, raster.transform)
+                        raster_win = rio.windows.from_bounds(
+                            *window_bounds, raster.transform
+                        )
 
                         data.append(
                             np.clip(
-                                raster.read(1, window=raster_win, masked=True, boundless=True).filled(np.nan),
+                                raster.read(
+                                    1, window=raster_win, masked=True, boundless=True
+                                ).filled(np.nan),
                                 -v_clip,
                                 v_clip,
                             )
@@ -1120,32 +1285,40 @@ def big_median_stack(years: int | list[int] | None = 2021, n_threads: int | None
                 # print(window.row_off, window.row_off + window.height, window.col_off,window.col_off + window.width)
                 if write_in_mem:
                     stack[
-                        window.row_off : window.row_off + window.height, window.col_off : window.col_off + window.width
+                        window.row_off : window.row_off + window.height,
+                        window.col_off : window.col_off + window.width,
                     ] = median
                 else:
-                    out_raster.write(np.where(np.isfinite(median), median, -9999), 1, window=window)
+                    out_raster.write(
+                        np.where(np.isfinite(median), median, -9999), 1, window=window
+                    )
 
             progress_bar.update()
             return median
 
-        with tqdm(total=len(window_infos), desc="Calculating median blocks", smoothing=0.1) as progress_bar:
+        with tqdm(
+            total=len(window_infos), desc="Calculating median blocks", smoothing=0.1
+        ) as progress_bar:
             if n_threads == 1:
                 for window_info in window_infos:
                     process(window_info=window_info, progress_bar=progress_bar)
             else:
-                with concurrent.futures.ThreadPoolExecutor(max_workers=n_threads) as executor:
+                with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=n_threads
+                ) as executor:
                     with warnings.catch_warnings():
                         warnings.filterwarnings("ignore", "All-NaN slice")
-                        list(executor.map(lambda wi: process(wi, progress_bar=progress_bar), window_infos))
+                        list(
+                            executor.map(
+                                lambda wi: process(wi, progress_bar=progress_bar),
+                                window_infos,
+                            )
+                        )
 
     if write_in_mem:
         if verbose:
             print(f"{now_time()}: Writing {output_path.name}")
-        with rio.open(
-            temp_path,
-            "w",
-            **write_params
-        ) as raster:
+        with rio.open(temp_path, "w", **write_params) as raster:
             raster.write(np.where(np.isfinite(stack), stack, -9999), 1)
 
     shutil.move(temp_path, output_path)
@@ -1156,7 +1329,6 @@ def big_median_stack(years: int | list[int] | None = 2021, n_threads: int | None
 
 
 def uncertainty():
-
     poi_coords = 538280, 8669555, 544315, 8675410
     poi = shapely.geometry.box(*poi_coords)
     stable_terrain_path = build_stable_terrain_mask()
@@ -1164,21 +1336,34 @@ def uncertainty():
     median_stack_path = Path("temp/dhdt/median_dhdt_2021.tif")
     npi_mosaic_path, _ = build_npi_mosaic()
 
-    npi_dem = xdem.DEM(str(npi_mosaic_path), load_data=False).crop(poi_coords, inplace=False)
-    stable_terrain = gu.Raster(str(stable_terrain_path), load_data=False).crop(poi_coords, inplace=False)
+    npi_dem = xdem.DEM(str(npi_mosaic_path), load_data=False).crop(
+        poi_coords, inplace=False
+    )
+    stable_terrain = gu.Raster(str(stable_terrain_path), load_data=False).crop(
+        poi_coords, inplace=False
+    )
 
     unstable_terrain_mask = stable_terrain.data != 1
 
-    median = gu.Raster(str(median_stack_path), load_data=False).crop(poi_coords, inplace=False)
+    median = gu.Raster(str(median_stack_path), load_data=False).crop(
+        poi_coords, inplace=False
+    )
 
     # median.data.mask[stable_terrain.data != 1] = True
 
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", "Setting default nodata")
-        slope, maxc = xdem.terrain.get_terrain_attribute(npi_dem, ["slope", "maximum_curvature"])
+        slope, maxc = xdem.terrain.get_terrain_attribute(
+            npi_dem, ["slope", "maximum_curvature"]
+        )
 
-    errors, df_binning, error_function = xdem.spatialstats.infer_heteroscedasticity_from_stable(
-        dvalues=median, list_var=[slope, maxc], list_var_names=["slope", "maxc"], unstable_mask=unstable_terrain_mask
+    errors, df_binning, error_function = (
+        xdem.spatialstats.infer_heteroscedasticity_from_stable(
+            dvalues=median,
+            list_var=[slope, maxc],
+            list_var_names=["slope", "maxc"],
+            unstable_mask=unstable_terrain_mask,
+        )
     )
 
     zscores = median / errors
@@ -1187,7 +1372,10 @@ def uncertainty():
         params_variogram_model,
         spatial_corr_function,
     ) = xdem.spatialstats.infer_spatial_correlation_from_stable(
-        dvalues=zscores, list_models=["Gaussian", "Spherical"], unstable_mask=unstable_terrain_mask, random_state=42
+        dvalues=zscores,
+        list_models=["Gaussian", "Spherical"],
+        unstable_mask=unstable_terrain_mask,
+        random_state=42,
     )
 
     areas = 10 ** np.linspace(1, 12)
@@ -1221,7 +1409,6 @@ def uncertainty():
 
 
 def process_all(show_progress_bar: bool = True):
-
     strips = get_strips()
 
     # All of Nordenskiöld Land
@@ -1241,7 +1428,9 @@ def process_all(show_progress_bar: bool = True):
 
     failures_file = Path(f"failures.{REGION}.csv")
 
-    strips = strips[strips.intersects(poi)].sort_values("start_datetime", ascending=False)
+    strips = strips[strips.intersects(poi)].sort_values(
+        "start_datetime", ascending=False
+    )
     if failures_file.is_file():
         failures = pd.read_csv(failures_file, names=["title", "exception"])
         strips = strips[~strips["title"].isin(failures["title"])]
@@ -1253,23 +1442,27 @@ def process_all(show_progress_bar: bool = True):
         "SETSM_s2s041_W1W3_20180405_10200100706CF700_104001003CAF7A00_2m_lsf_seg1_dem",
         "SETSM_s2s041_WV01_20170522_10200100622AE000_1020010060E84300_2m_lsf_seg1",
         "SETSM_s2s041_WV03_20150316_10400100085B1D00_1040010009170400_2m_lsf_seg6",
-
-
     ]
 
     current_year = strips["start_datetime"].dt.year.max()  # type: ignore
     with tqdm(total=strips.shape[0], disable=(not show_progress_bar)) as progress_bar:
         for _, dem_data in strips.iterrows():
-
             if dem_data["start_datetime"].year != current_year:  # type: ignore
                 if not show_progress_bar:
-                    print(f"{now_time()}: Finished {current_year}. Creating dHdt and DEM mosaics")
+                    print(
+                        f"{now_time()}: Finished {current_year}. Creating dHdt and DEM mosaics"
+                    )
                 else:
-                    progress_bar.set_description(f"Finished {current_year}. Creating dHdt and DEM mosaics")
+                    progress_bar.set_description(
+                        f"Finished {current_year}. Creating dHdt and DEM mosaics"
+                    )
                 for raster_type in ["dhdt", "dem"]:
-
                     # print("Skipping for now since it crashes. TODO: Fix that!")
-                    big_median_stack(years=current_year, raster_type=raster_type, verbose=(not show_progress_bar))
+                    big_median_stack(
+                        years=current_year,
+                        raster_type=raster_type,
+                        verbose=(not show_progress_bar),
+                    )
 
                 current_year = dem_data["start_datetime"].year  # type: ignore
 
@@ -1281,16 +1474,25 @@ def process_all(show_progress_bar: bool = True):
                 print(f"Skipping {dem_path}")
                 continue
             try:
-                dem_coreg = coregister(dem_path=dem_path, verbose=(not show_progress_bar))
+                dem_coreg = coregister(
+                    dem_path=dem_path, verbose=(not show_progress_bar)
+                )
             except Exception as exception:
-
                 exception_str = str(exception)
-                if exception.__class__.__name__ == "AssertionError" and len(exception_str) == 0:
+                if (
+                    exception.__class__.__name__ == "AssertionError"
+                    and len(exception_str) == 0
+                ):
                     with open(failures_file, "a+") as outfile:
-                        outfile.write(dem_data["title"] + ',"Empty AssertionError; probably xdem"\n')
+                        outfile.write(
+                            dem_data["title"]
+                            + ',"Empty AssertionError; probably xdem"\n'
+                        )
                     progress_bar.update()
-                    if (not show_progress_bar):
-                        print(f"{now_time()}: {dem_data['title']} failed. Recorded failure")
+                    if not show_progress_bar:
+                        print(
+                            f"{now_time()}: {dem_data['title']} failed. Recorded failure"
+                        )
                     continue
 
                 if not any(
@@ -1309,11 +1511,15 @@ def process_all(show_progress_bar: bool = True):
                         "boolean index did not match indexed array along dimension 0",
                     ]
                 ):
-
                     raise exception
                 with open(failures_file, "a+") as outfile:
-                    outfile.write(dem_data["title"] + ',"' + str(exception).replace("\n", " ") + '"\n')
-                if (not show_progress_bar):
+                    outfile.write(
+                        dem_data["title"]
+                        + ',"'
+                        + str(exception).replace("\n", " ")
+                        + '"\n'
+                    )
+                if not show_progress_bar:
                     print(f"{now_time()}: {dem_data['title']} failed. Recorded failure")
                 progress_bar.update()
                 continue
@@ -1327,7 +1533,9 @@ def process_all(show_progress_bar: bool = True):
                 progress_bar.update()
 
 
-def ransac_fit(heights: da.Array | np.ndarray, time: da.Array | np.ndarray, degree: int):
+def ransac_fit(
+    heights: da.Array | np.ndarray, time: da.Array | np.ndarray, degree: int
+):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)
         inlier_mask = np.isfinite(heights)
@@ -1336,7 +1544,9 @@ def ransac_fit(heights: da.Array | np.ndarray, time: da.Array | np.ndarray, degr
 
         model = sklearn.pipeline.make_pipeline(
             sklearn.preprocessing.PolynomialFeatures(degree=degree),
-            sklearn.linear_model.RANSACRegressor(min_samples=2, max_trials=100, random_state=1),
+            sklearn.linear_model.RANSACRegressor(
+                min_samples=2, max_trials=100, random_state=1
+            ),
         )
         model.fit(
             time[inlier_mask].reshape((-1, 1)),
@@ -1348,7 +1558,13 @@ def ransac_fit(heights: da.Array | np.ndarray, time: da.Array | np.ndarray, degr
         return np.r_[estimator.coef_[1:][::-1], [estimator.intercept_]]
 
 
-def apply_ransac_fit(arr: da.Array, time: da.Array, res: tuple[float, float], max_distance: float, degree: int):
+def apply_ransac_fit(
+    arr: da.Array,
+    time: da.Array,
+    res: tuple[float, float],
+    max_distance: float,
+    degree: int,
+):
     arr = da.array(arr)
 
     window_size = arr.shape[-1]
@@ -1370,7 +1586,9 @@ def apply_ransac_fit(arr: da.Array, time: da.Array, res: tuple[float, float], ma
 
     elev_mask = da.zeros_like(arr, dtype="bool")
     elev_mask[:, :, :, :, :] = (
-        (da.abs(median_elev - mid_median_elev) < 1).reshape((1,) + median_elev.shape).repeat(arr.shape[0], axis=0)
+        (da.abs(median_elev - mid_median_elev) < 1)
+        .reshape((1,) + median_elev.shape)
+        .repeat(arr.shape[0], axis=0)
     )
 
     distance_mask = da.zeros_like(arr, dtype="bool")
@@ -1411,13 +1629,16 @@ def apply_ransac_fit(arr: da.Array, time: da.Array, res: tuple[float, float], ma
 
     heights = da.moveaxis(arr, 0, 2).reshape(median_elev.shape[:2] + (-1,))
 
-    result = da.moveaxis(da.apply_along_axis(ransac_fit, axis=2, arr=heights, time=time, degree=degree), 2, 0)
+    result = da.moveaxis(
+        da.apply_along_axis(ransac_fit, axis=2, arr=heights, time=time, degree=degree),
+        2,
+        0,
+    )
 
     return result
 
 
 def block_polyfit(rolled: xr.DataArray, res, max_distance, times, names):
-
     return (
         xr.apply_ufunc(
             apply_ransac_fit,
@@ -1434,16 +1655,19 @@ def block_polyfit(rolled: xr.DataArray, res, max_distance, times, names):
             output_core_dims=[("time", "y", "x")],
             exclude_dims=set(["rx", "ry", "time"]),
             dask="allowed",
-            kwargs=dict(res=res, max_distance=max_distance, time=times, degree=len(names) - 1),
+            kwargs=dict(
+                res=res, max_distance=max_distance, time=times, degree=len(names) - 1
+            ),
         )
         .rename(time="coef")
         .assign_coords(coef=names)
     )
 
 
-def glacier_stack(glacier="tinkarp", force_redo: bool = False, verbose: bool = True, client= None):
-
-    #if client is None:
+def glacier_stack(
+    glacier="tinkarp", force_redo: bool = False, verbose: bool = True, client=None
+):
+    # if client is None:
     #    client = dask.distributed.Client()
 
     glacier_info = GLACIERS[glacier]
@@ -1456,8 +1680,6 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False, verbose: bool = T
     poly_path = nc_path.with_stem(nc_path.stem + "_poly")
     stack_corr_path = poly_path.with_stem(poly_path.stem + "_corr")
 
-
-
     res = (5, 5)
     bounds = align_bounds(rio.coords.BoundingBox(*glacier_info["bounds"]), res=res)
     poi = shapely.geometry.box(*bounds)
@@ -1465,19 +1687,37 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False, verbose: bool = T
     height = int((bounds.top - bounds.bottom) / res[1])
     transform = rio.transform.from_bounds(*bounds, width, height)
     xr_coords = [
-        ("y", np.linspace(bounds.bottom + res[1] / 2, bounds.top - res[1] / 2, height)[::-1]),
+        (
+            "y",
+            np.linspace(bounds.bottom + res[1] / 2, bounds.top - res[1] / 2, height)[
+                ::-1
+            ],
+        ),
         ("x", np.linspace(bounds.left + res[0] / 2, bounds.right - res[0] / 2, width)),
     ]
     if not nc_path.is_file() or force_redo:
-
         dems_dir = temp_dir.joinpath("arcticdem_coreg")
-        ref_dem_path, ref_dem_years_path = build_npi_mosaic(region=glacier_info["region"])
+        ref_dem_path, ref_dem_years_path = build_npi_mosaic(
+            region=glacier_info["region"]
+        )
         stable_terrain_path = build_stable_terrain_mask(region=glacier_info["region"])
 
         if "rgi_id" in glacier_info:
-            rgi = gpd.read_file("zip:///home/erik/Projects/UiO/HeerLandSurges/input/RGI7/RGI2000-v7.0-G-07_svalbard_jan_mayen.zip!RGI2000-v7.0-G-07_svalbard_jan_mayen.shp").query(f"rgi_id == '{glacier_info['rgi_id']}'").to_crs(32633).iloc[0]
+            rgi = (
+                gpd.read_file(
+                    "zip:///home/erik/Projects/UiO/HeerLandSurges/input/RGI7/RGI2000-v7.0-G-07_svalbard_jan_mayen.zip!RGI2000-v7.0-G-07_svalbard_jan_mayen.shp"
+                )
+                .query(f"rgi_id == '{glacier_info['rgi_id']}'")
+                .to_crs(32633)
+                .iloc[0]
+            )
 
-            rgi = rasterio.features.rasterize([rgi.geometry], out_shape=(height, width), transform=transform, default_value=1)
+            rgi = rasterio.features.rasterize(
+                [rgi.geometry],
+                out_shape=(height, width),
+                transform=transform,
+                default_value=1,
+            )
         else:
             rgi = None
 
@@ -1499,15 +1739,24 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False, verbose: bool = T
                 if not poi.intersects(shapely.geometry.box(*raster.bounds)):
                     continue
 
-                window = rio.windows.from_bounds(*poi.bounds, transform=raster.transform)
-                data = raster.read(1, window=window, masked=True, boundless=True).filled(np.nan)
+                window = rio.windows.from_bounds(
+                    *poi.bounds, transform=raster.transform
+                )
+                data = raster.read(
+                    1, window=window, masked=True, boundless=True
+                ).filled(np.nan)
 
             if np.count_nonzero(np.isfinite(data)) == 0:
                 continue
 
             date = pd.to_datetime(filepath.stem.split("_")[3])
 
-            year_dec = date.year + (date.month / 12) + (date.day / (30 * 12)) + (i / (365 * 24))
+            year_dec = (
+                date.year
+                + (date.month / 12)
+                + (date.day / (30 * 12))
+                + (i / (365 * 24))
+            )
 
             # arrays[i, :, :] = data
             arrays.append(data)
@@ -1515,14 +1764,23 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False, verbose: bool = T
 
             i += 1
 
-        stack = xr.Dataset({"ad_elevation": xr.DataArray(arrays, coords=[("time", times)] + xr_coords)})
+        stack = xr.Dataset(
+            {"ad_elevation": xr.DataArray(arrays, coords=[("time", times)] + xr_coords)}
+        )
         stack = stack.sortby("time")
 
-        for name, path in [("stable_terrain", stable_terrain_path), ("ref_dem", ref_dem_path), ("ref_dem_year", ref_dem_years_path)]:
-            
+        for name, path in [
+            ("stable_terrain", stable_terrain_path),
+            ("ref_dem", ref_dem_path),
+            ("ref_dem_year", ref_dem_years_path),
+        ]:
             with rio.open(path) as raster:
-                window = rio.windows.from_bounds(*poi.bounds, transform=raster.transform)
-                data = raster.read(1, window=window, masked=True, boundless=True).filled(0)
+                window = rio.windows.from_bounds(
+                    *poi.bounds, transform=raster.transform
+                )
+                data = raster.read(
+                    1, window=window, masked=True, boundless=True
+                ).filled(0)
 
             # stack[name] = xr.DataArray(data, coords=xr_coords)
             stack[name] = ("y", "x"), data
@@ -1532,11 +1790,17 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False, verbose: bool = T
 
         median_elevation = stack["ad_elevation"].median("time")
 
-        diffs = (stack["ad_elevation"] - median_elevation).where(stack["stable_terrain"] == 1).median(["x", "y"])
+        diffs = (
+            (stack["ad_elevation"] - median_elevation)
+            .where(stack["stable_terrain"] == 1)
+            .median(["x", "y"])
+        )
         stack["ad_elevation"] = stack["ad_elevation"] - diffs
 
         stack.to_netcdf(
-            nc_path, encoding={key: {"zlib": True, "complevel": 9} for key in stack.data_vars}, engine="h5netcdf"
+            nc_path,
+            encoding={key: {"zlib": True, "complevel": 9} for key in stack.data_vars},
+            engine="h5netcdf",
         )
     else:
         stack = xr.open_dataset(nc_path, chunks={"x": 10, "y": 10})
@@ -1560,17 +1824,23 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False, verbose: bool = T
 
     width = 400
     poi_slices = {
-        k: {"x": slice(v["x"] - width / 2, v["x"] + width / 2), "y": slice(v["y"] + width / 2, v["y"] - width / 2)}
+        k: {
+            "x": slice(v["x"] - width / 2, v["x"] + width / 2),
+            "y": slice(v["y"] + width / 2, v["y"] - width / 2),
+        }
         for k, v in pois.items()
     }
     degree = 2
-    names = ["poly_" + ("abcdefghijk"[i] if i != (degree) else "bias") for i in range(degree + 1)]
+    names = [
+        "poly_" + ("abcdefghijk"[i] if i != (degree) else "bias")
+        for i in range(degree + 1)
+    ]
 
     max_distance = 200
 
     # stack["ad_elevation_med_temp"] = stack["ad_elevation"].median("time")
     stack["t"] = stack["time"] - 2021
-    #location = stack.sel(**poi_slices["accumulation_prob"])
+    # location = stack.sel(**poi_slices["accumulation_prob"])
     location = stack
 
     chunking = {"x": 10, "y": 10}
@@ -1583,25 +1853,38 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False, verbose: bool = T
 
     times = da.array(location.t.values).repeat(window_size**2)
 
-    rolled = (location["ad_elevation"].rolling(x=window_size, y=window_size, center=True).construct(y="ry", x="rx")).chunk(**chunking, rx=window_size, ry=window_size).to_dataset()
+    rolled = (
+        (
+            location["ad_elevation"]
+            .rolling(x=window_size, y=window_size, center=True)
+            .construct(y="ry", x="rx")
+        )
+        .chunk(**chunking, rx=window_size, ry=window_size)
+        .to_dataset()
+    )
 
     template = xr.DataArray(
         np.zeros((len(names), location.y.shape[0], location.x.shape[0])),
         coords=[("coef", names), location.y, location.x],
     ).chunk(chunking)
     import zarr
+
     output_path = Path("./polyfit_test.nc")
-    #output_path = Path("./polyfit_test.zarr")
+    # output_path = Path("./polyfit_test.zarr")
     with tempfile.TemporaryDirectory() as temp_dir:
         rolled_path = Path(temp_dir).joinpath("rolled.zarr")
 
         compressor = zarr.Blosc(cname="zstd", clevel=3, shuffle=2)
-        
+
         if verbose:
             print("Writing rolled to a temporary file")
-        task = rolled.to_zarr(rolled_path, encoding={v: {"compressor": compressor} for v in rolled.data_vars}, compute=True)
+        task = rolled.to_zarr(
+            rolled_path,
+            encoding={v: {"compressor": compressor} for v in rolled.data_vars},
+            compute=True,
+        )
 
-        #with TqdmCallback(desc="Writing rolled to a temporary file", smoothing=0.1):
+        # with TqdmCallback(desc="Writing rolled to a temporary file", smoothing=0.1):
         #    task.compute()
 
         if verbose:
@@ -1611,15 +1894,18 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False, verbose: bool = T
             polyfit = xr.map_blocks(
                 block_polyfit,
                 rolled,
-                kwargs=dict(times=times.compute(), res=res, max_distance=max_distance, names=names),
+                kwargs=dict(
+                    times=times.compute(),
+                    res=res,
+                    max_distance=max_distance,
+                    names=names,
+                ),
                 template=template,
             ).to_dataset(name="polyfit")
             polyfit["coef"] = polyfit["coef"].astype(str)
 
-
             # if output_path.is_dir():
             #     shutil.rmtree(output_path)
-
 
             # with TqdmCallback():
             #     polyfit = polyfit.compute(scheduler="processes")
@@ -1630,14 +1916,15 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False, verbose: bool = T
             #     task.compute()
             # return
 
-            #TODO: There's a huge bottleneck here. scheduler="processes" is much much faster, but netcdf cannot be written concurrently
+            # TODO: There's a huge bottleneck here. scheduler="processes" is much much faster, but netcdf cannot be written concurrently
             # A much better alternative would be to write to a zarr, but that errors out for some weird reason.
 
             print("Processing")
-            task = polyfit.to_netcdf(output_path, compute=False)# encoding={v: {"compressor": compressor} for v in polyfit.data_vars}, compute=False)
+            task = polyfit.to_netcdf(
+                output_path, compute=False
+            )  # encoding={v: {"compressor": compressor} for v in polyfit.data_vars}, compute=False)
             with TqdmCallback():
                 task.compute()
-
 
     polyfit = xr.open_dataset(output_path)
 
@@ -1646,21 +1933,22 @@ def glacier_stack(glacier="tinkarp", force_redo: bool = False, verbose: bool = T
 
 
 def symlink_region(region: str):
-
     if region == REGION:
-        raise NotImplementedError("This is supposed to work with another region than the selected")
+        raise NotImplementedError(
+            "This is supposed to work with another region than the selected"
+        )
 
     # new_bounds = get_bounds(region=region)
     new_bounds = align_bounds(CONSTANTS.regions[region])
-    
-    temp_dir = get_temp_dir() 
-    dem_dir = temp_dir / "arcticdem_coreg/"
 
+    temp_dir = get_temp_dir()
+    dem_dir = temp_dir / "arcticdem_coreg/"
 
     dems_overlapping = []
 
-    for filepath in tqdm(list(dem_dir.glob("*dem_coreg.tif")), desc="Creating symlinks"):
-
+    for filepath in tqdm(
+        list(dem_dir.glob("*dem_coreg.tif")), desc="Creating symlinks"
+    ):
         year = int(filepath.stem.split("_")[3][:4])
 
         out_path = temp_dir / f"{region}_dem_coreg/{year}" / filepath.name
@@ -1670,7 +1958,6 @@ def symlink_region(region: str):
         with rio.open(filepath) as raster:
             if not adsvalbard.utilities.bounds_intersect(new_bounds, raster.bounds):
                 continue
-
 
         out_path.parent.mkdir(exist_ok=True, parents=True)
 
@@ -1682,14 +1969,12 @@ def symlink_region(region: str):
     print(f"Added {len(dems_overlapping)} (x2) new symlinks")
 
 
-
 def main(client):
     process_all(show_progress_bar=False)
     # glacier_stack()
 
 
-
 if __name__ == "__main__":
-    #client = dask.distributed.Client("127.0.0.1:8786")
-    #glacier_stack("dronbreen", client=None)
+    # client = dask.distributed.Client("127.0.0.1:8786")
+    # glacier_stack("dronbreen", client=None)
     main(None)

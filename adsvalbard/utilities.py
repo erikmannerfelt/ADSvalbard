@@ -60,7 +60,9 @@ def align_bounds(
     The aligned bounding box.
     """
     if isinstance(bounds, rasterio.coords.BoundingBox):
-        bounds_dict: dict[str, float] = {key: getattr(bounds, key) for key in ["left", "bottom", "right", "top"]}
+        bounds_dict: dict[str, float] = {
+            key: getattr(bounds, key) for key in ["left", "bottom", "right", "top"]
+        }
     else:
         bounds_dict = bounds
 
@@ -69,16 +71,21 @@ def align_bounds(
     # Ensure that the moduli of the bounds are zero
     for i, bound0 in enumerate([["left", "right"], ["bottom", "top"]]):
         for j, bound in enumerate(bound0):
-
             mod = (bounds_dict[bound] - (res[i] / 2 if half_mod else 0)) % res[i]
 
             bounds_dict[bound] = (
-                bounds_dict[bound] - mod + (res[i] if i > 0 and mod != 0 else 0) + ((buffer or 0) * (1 if bound in ["right", "top"] else -1))
+                bounds_dict[bound]
+                - mod
+                + (res[i] if i > 0 and mod != 0 else 0)
+                + ((buffer or 0) * (1 if bound in ["right", "top"] else -1))
             )
 
     return rasterio.coords.BoundingBox(**bounds_dict)
 
-def get_transform(bounds: rasterio.coords.BoundingBox, res: list[float] | None = None) -> rio.Affine:
+
+def get_transform(
+    bounds: rasterio.coords.BoundingBox, res: list[float] | None = None
+) -> rio.Affine:
     """
     Get the affine transform of the output DEMs.
 
@@ -95,7 +102,10 @@ def get_transform(bounds: rasterio.coords.BoundingBox, res: list[float] | None =
 
     return rasterio.transform.from_origin(bounds.left, bounds.top, *res)
 
-def get_shape(bounds: rasterio.coords.BoundingBox, res: list[float] | None = None) -> tuple[int, int]:
+
+def get_shape(
+    bounds: rasterio.coords.BoundingBox, res: list[float] | None = None
+) -> tuple[int, int]:
     """
     Get the pixel shape (height, width) of the output DEMs
 
@@ -111,10 +121,15 @@ def get_shape(bounds: rasterio.coords.BoundingBox, res: list[float] | None = Non
     if res is None:
         res = [CONSTANTS.res] * 2
 
-    return (int((bounds.top - bounds.bottom) / res[1]), int((bounds.right - bounds.left) / res[0]))
+    return (
+        int((bounds.top - bounds.bottom) / res[1]),
+        int((bounds.right - bounds.left) / res[0]),
+    )
 
 
-def get_bounds(region: str, res: list[float] | None = None, half_mod: bool = False) -> rasterio.coords.BoundingBox:
+def get_bounds(
+    region: str, res: list[float] | None = None, half_mod: bool = False
+) -> rasterio.coords.BoundingBox:
     """
     Get the bounding box of the requested region.
 
@@ -180,9 +195,10 @@ def get_data_dir(label: str) -> Path:
 
     return data_base_dir.joinpath(subdir)
 
-        
 
-def download_large_file(url: str, filename: str | None = None, directory: Path | str | None = None) -> Path:
+def download_large_file(
+    url: str, filename: str | None = None, directory: Path | str | None = None
+) -> Path:
     """
     Download a large file from the given URL.
 
@@ -219,7 +235,6 @@ def download_large_file(url: str, filename: str | None = None, directory: Path |
             request.raise_for_status()
 
             with tempfile.TemporaryDirectory() as temp_dir:
-
                 temp_path = Path(temp_dir).joinpath("temp.tif")
                 with open(temp_path, "wb") as outfile:
                     shutil.copyfileobj(request.raw, outfile)
@@ -228,9 +243,10 @@ def download_large_file(url: str, filename: str | None = None, directory: Path |
 
     return out_path
 
-    
-    
-def shape_from_bounds_res(bounds: rasterio.coords.BoundingBox, res: list[float]) -> tuple[int, int]:
+
+def shape_from_bounds_res(
+    bounds: rasterio.coords.BoundingBox, res: list[float]
+) -> tuple[int, int]:
     """
     Get the shape of a raster based on its bounding box and resolution.
 
@@ -248,15 +264,19 @@ def shape_from_bounds_res(bounds: rasterio.coords.BoundingBox, res: list[float])
     (10, 1)
     >>> shape_from_bounds_res(bounds, [1., 1.])
     (10, 10)
-            
+
     Returns
     -------
     The shape (height, width) of the raster.
     """
-    return int((bounds.top - bounds.bottom) / res[1]), int((bounds.right- bounds.left) / res[0])
+    return int((bounds.top - bounds.bottom) / res[1]), int(
+        (bounds.right - bounds.left) / res[0]
+    )
 
 
-def res_from_bounds_shape(bounds: rasterio.coords.BoundingBox, shape: tuple[int, int]) -> tuple[float, float]:
+def res_from_bounds_shape(
+    bounds: rasterio.coords.BoundingBox, shape: tuple[int, int]
+) -> tuple[float, float]:
     """
     Get the resolution of a raster based on its bounding box and shape.
 
@@ -279,10 +299,14 @@ def res_from_bounds_shape(bounds: rasterio.coords.BoundingBox, shape: tuple[int,
     -------
     The resolution in [X, Y] of the raster.
     """
-    return (bounds.right - bounds.left) / shape[1], (bounds.top - bounds.bottom) / shape[0]
+    return (bounds.right - bounds.left) / shape[1], (
+        bounds.top - bounds.bottom
+    ) / shape[0]
 
 
-def generate_eastings_northings(bounds: rasterio.coords.BoundingBox, shape: tuple[int, int]) -> tuple[np.ndarray, np.ndarray]:
+def generate_eastings_northings(
+    bounds: rasterio.coords.BoundingBox, shape: tuple[int, int]
+) -> tuple[np.ndarray, np.ndarray]:
     """Calculate easting/northing pixel midpoint coordinates for the given bounds and shape.
 
     Parameters
@@ -300,14 +324,17 @@ def generate_eastings_northings(bounds: rasterio.coords.BoundingBox, shape: tupl
     res = res_from_bounds_shape(bounds=bounds, shape=shape)
 
     eastings, northings = np.meshgrid(
-        np.linspace(bounds.left +  res[1]/ 2, bounds.right - res[1] / 2, shape[1]),
-        np.linspace(bounds.bottom + res[0]/ 2, bounds.top - res[0] / 2, shape[0])[::-1],
+        np.linspace(bounds.left + res[1] / 2, bounds.right - res[1] / 2, shape[1]),
+        np.linspace(bounds.bottom + res[0] / 2, bounds.top - res[0] / 2, shape[0])[
+            ::-1
+        ],
     )
     return eastings, northings
-    
 
 
-def warp_bounds(bounds: rasterio.coords.BoundingBox, in_crs: rio.CRS, out_crs: rio.CRS) -> rasterio.coords.BoundingBox:
+def warp_bounds(
+    bounds: rasterio.coords.BoundingBox, in_crs: rio.CRS, out_crs: rio.CRS
+) -> rasterio.coords.BoundingBox:
     """
     Warp the given bounding box from one CRS to another.
 
@@ -325,13 +352,16 @@ def warp_bounds(bounds: rasterio.coords.BoundingBox, in_crs: rio.CRS, out_crs: r
     An equivalent bounding box in the target (`out_crs`) CRS.
     """
     outline = shapely.geometry.box(*bounds).exterior
-    points = gpd.GeoSeries([outline.interpolate(i, normalized=True) for i in np.linspace(0, 1)], crs=in_crs).to_crs(out_crs)
+    points = gpd.GeoSeries(
+        [outline.interpolate(i, normalized=True) for i in np.linspace(0, 1)], crs=in_crs
+    ).to_crs(out_crs)
 
     return rasterio.coords.BoundingBox(*points.total_bounds)
 
-    
 
-def bounds_intersect(bounds0: rasterio.coords.BoundingBox, bounds1: rasterio.coords.BoundingBox) -> bool:
+def bounds_intersect(
+    bounds0: rasterio.coords.BoundingBox, bounds1: rasterio.coords.BoundingBox
+) -> bool:
     """
     Test whether two bounding boxes intersect or one contains the other.
 
@@ -353,7 +383,7 @@ def bounds_intersect(bounds0: rasterio.coords.BoundingBox, bounds1: rasterio.coo
     True
     >>> bounds_intersect(bounds0, bounds2)
     False
-    
+
     Returns
     -------
     A boolean flag whether the boxes intersect or one contains the other.
@@ -363,10 +393,12 @@ def bounds_intersect(bounds0: rasterio.coords.BoundingBox, bounds1: rasterio.coo
     return box0.overlaps(box1) or box0.within(box1) or box1.within(box0)
 
 
-
 def get_resampling_gdal_to_rio() -> dict[str, rasterio.warp.Resampling]:
     """Get a translation dict from GDAL resampling names to rasterio enums."""
-    resamplings = {"NearestNeighbour": rasterio.warp.Resampling.nearest, "CubicSpline": rasterio.warp.Resampling.cubic_spline}
+    resamplings = {
+        "NearestNeighbour": rasterio.warp.Resampling.nearest,
+        "CubicSpline": rasterio.warp.Resampling.cubic_spline,
+    }
 
     for value in rasterio.warp.Resampling.__dict__:
         if value.startswith("_") or value.endswith("_"):
@@ -378,7 +410,8 @@ def get_resampling_gdal_to_rio() -> dict[str, rasterio.warp.Resampling]:
         resamplings[value.capitalize()] = resampling
 
     return resamplings
-    
+
+
 def resampling_rio_to_gdal(resampling: rasterio.warp.Resampling) -> str:
     """
     Get the GDAL name of the queried rasterio resampling algorithm.
@@ -396,7 +429,7 @@ def resampling_rio_to_gdal(resampling: rasterio.warp.Resampling) -> str:
     'NearestNeighbour'
     """
     inverted = {v: k for k, v in get_resampling_gdal_to_rio().items()}
-    return inverted[resampling] 
+    return inverted[resampling]
 
 
 def now_time() -> str:
