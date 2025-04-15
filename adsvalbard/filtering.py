@@ -625,11 +625,19 @@ def create_gap_mask(
 
 
 def generate_all_masks(
-    subdir: str = "heerland_dem_coreg", verbose_progress: bool = False
+    subdir: str = "arcticdem_coreg", verbose_progress: bool = False
 ):
     filestems = list(
-        map(lambda fp: fp.stem, Path(f"temp.svalbard/{subdir}/").glob("*/*.tif"))
+        map(
+            lambda fp: fp.stem,
+            sorted(
+                Path(f"temp.svalbard/{subdir}/").rglob("*.tif"),
+                key=lambda fp: fp.stem.split("_")[3],
+                reverse=True,
+            )
+        )
     )
+
     model_result = GapModel.default()
 
     finished = []
@@ -643,9 +651,17 @@ def generate_all_masks(
         else:
             to_process.append(i)
 
-    for i in tqdm(to_process, desc="Generating masks", disable=verbose_progress):
-        stem = filestems[i]
-        create_gap_mask(filename=stem, model=model_result, verbose=verbose_progress)
+    with tqdm(total=len(to_process), disable=verbose_progress) as progress_bar:
+        for i in to_process:
+            stem = filestems[i]
+            progress_bar.set_description(stem)
+            try:
+                create_gap_mask(filename=stem, model=model_result, verbose=verbose_progress)
+            except ValueError as exception:
+                print(f"Exception: {exception}")
+
+
+            progress_bar.update()
 
     return
 

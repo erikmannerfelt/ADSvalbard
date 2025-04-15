@@ -112,11 +112,11 @@ def get_strips(region_label: str = "nordenskiold") -> gpd.GeoDataFrame:
 
         return out
 
-    strips = gpd.GeoDataFrame.from_records(
+    strips = pd.DataFrame.from_records(
         [format_strip(meta) for meta in all_strip_meta]
     )
     strips["geometry"] = strips["geometry"].apply(shapely.geometry.shape)
-    strips.crs = rio.CRS.from_epsg(4326)
+    strips = gpd.GeoDataFrame(strips.drop(columns=["geometry"]), geometry=strips["geometry"], crs=rio.CRS.from_epsg(4326))
     strips["geometry"] = gpd.GeoSeries.from_wkb(
         strips["geometry"].to_wkb(output_dimension=2)
     )
