@@ -2,6 +2,9 @@ import json
 import shutil
 import warnings
 from pathlib import Path
+import threading
+import functools
+import shutil
 
 import dask
 import geopandas as gpd
@@ -14,6 +17,11 @@ import tqdm.dask
 import xarray as xr
 import zarr
 from dask.array.core import PerformanceWarning
+
+import rasterio
+import rasterio.coords
+import rasterio.transform
+import rasterio.windows
 
 import adsvalbard.utilities
 from adsvalbard.constants import CONSTANTS
@@ -214,6 +222,7 @@ def main():
                 "y": 8625060,
                 "desc": "Acc. area during/post surge",
                 "plot": True,
+                "max_z": 500,
             },
         },
         "Scheelebreen": {
@@ -222,6 +231,7 @@ def main():
                 "y": 8633541,
                 "desc": "Near the coast",
                 "plot": True,
+                "max_z": 500,
             },
             "accumulation_area": {
                 "x": 547717,
@@ -236,6 +246,7 @@ def main():
                 "y": 8643117,
                 "desc": "Surge bulge evolution",
                 "plot": True,
+                "max_z": 500,
             },
         },
         "Arnesenbreen": {
@@ -289,6 +300,7 @@ def main():
 
     with xr.open_zarr(stack_path) as data:
         data["elevation"] = data["elevation"].where(data["elevation"] != -9999.0)
+
         data["outlier_proba"] = data["outlier_proba"].astype("float32") / 255
 
         n_panels = sum(len(point_dict.keys()) for point_dict in points_to_plot.values())
@@ -319,10 +331,10 @@ def main():
                 point_coord = points_to_plot[glacier_name][point_key]
                 point = subset.sel(
                     x=point_coord["x"], y=point_coord["y"], method="nearest"
-                ).compute()
+                ).compute().dropna("filename", subset=["elevation"])
 
                 extreme_outliers = (
-                    (point["outlier_proba"] > 0.95) & (np.isfinite(point["elevation"]))
+                    (point["outlier_proba"] > 0.95) | (~np.isfinite(point["elevation"])) | (point["elevation"] > points_to_plot[glacier_name][point_key].get("max_z", 1000))
                 )  # | (np.abs(point["elevation"] - point["elevation"].median("filename")) > 300)
 
                 point["elevation"] = point["elevation"].where(~extreme_outliers)
@@ -397,7 +409,7 @@ def main():
         plt.subplots_adjust(
             left=0.052, bottom=0.036, right=0.995, top=0.974, wspace=0.188, hspace=0.155
         )
-        plt.savefig("figures/elevation_series_examples.jpg", dpi=600)
+        plt.savefig("figures/elevation_series_examples.pdf")
         # plt.tight_layout()
         plt.show()
 
@@ -700,32 +712,164 @@ def main():
         # plt.show()
 
         # print(data)
+        #
+        #
+        #
+
+def process_chunk(filepath: Path, input_filepaths: dict[Path, threading.Lock], outlier_proba_dir: Path, bounds: rasterio.coords.BoundingBox, res: float, crs: object, outlier_threshold: float, v_clip: float, progress_bar: tqdm.tqdm | None = None):
+    shape = adsvalbard.utilities.shape_from_bounds_res(bounds=bounds, res=[res] * 2)
+    transform = rasterio.transform.from_origin(bounds.left, bounds.top, res, res)
+
+    dtypes = {"median": "float32", "count": "uint8", "nmad": "float32", "doy": "uint16"}
+    # output_paths = {"median": filepath}
+    output_paths = {kind: filepath.with_stem(filepath.stem + (f"_{kind}" if kind != "median" else "")) for kind in dtypes}
+    temp_paths = {kind: fp.with_name(fp.name + ".tmp") for kind, fp in output_paths.items()}
+
+    orig_params = dict(
+                driver="GTiff",
+                width=shape[1],
+                height=shape[0],
+                count=1,
+                crs=crs,
+                transform=transform,
+                compress="deflate",
+                # BIGTIFF="YES",
+                tiled=True,
+                zlevel=12,
+    )
+    def write_params(kind: str) -> dict[str, object]:
+        params = orig_params.copy()
+
+        # params["fp"] = temp_paths[kind]
+        params["dtype"] = dtypes[kind]
+        
+        if dtypes[kind] == "float32":
+            params.update(
+                {
+                    "nodata": -9999,
+                }
+            )
+        elif kind == "doy":
+            params["nodata"] = 0
+        return params
+
+    data = []
+    doys = []
+    for path, lock in input_filepaths.items():
+        with lock:
+            with rasterio.open(path) as raster:
+                raster_win = rasterio.windows.from_bounds(
+                    *bounds, raster.transform
+                )
+
+                data.append(
+                    np.clip(
+                        raster.read(
+                            1, window=raster_win, masked=True, boundless=True
+                        ).filled(np.nan),
+                        -v_clip,
+                        v_clip,
+                    )
+                )
+
+            if path.name.endswith("epsg32633_5.0m.vrt"):
+                with rasterio.open(path.with_stem(path.stem.replace("_dem_", "_matchtag_"))) as raster2:
+                    data[-1][raster2.read(1, window=raster_win, masked=True, boundless=True).filled(0) == 0] = np.nan 
+
+            date_str = path.stem.split("_")[3]
+            year = date_str[:4]
+            doy = int(date_str[4:6]) * 30 + int(date_str[6:])
+            outlier_proba_path = outlier_proba_dir / f"{year}/{path.stem}_outlier_proba.tif"
+
+            doys.append(
+                np.zeros(shape, "uint16") + doy,
+            )
+
+            if outlier_threshold is not None:
+                with rasterio.open(outlier_proba_path) as raster:
+
+                    data[-1][raster.read(1, window=raster_win, masked=True, boundless=True).filled(255) > int(outlier_threshold * 255)] = np.nan
+
+    if len(data) == 0:
+        median = np.zeros(shape, dtype="float32") + np.nan
+        nmad = median.copy()
+        count = np.zeros(shape=shape, dtype="uint8")
+        doy = count.copy().astype("uint16")
+    else:
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", "All-NaN slice")
+            finites = np.isfinite(data)
+            median = np.nanmedian(data, axis=0)
+
+            doy = np.ma.median(np.ma.masked_array(doys, mask=~finites), axis=0).filled(0).astype("uint16")
+            count = np.count_nonzero(finites, axis=0)
+            doy[count == 0] = 0
+            nmad = 1.4826 * np.nanmedian(np.abs(data - median[None, :, :]), axis=0)
+
+    del data
+
+    # if np.count_nonzero(np.isfinite(median)) == 0:
+    #     if progress_bar is not None:
+    #         progress_bar.update()
+    #     return
+
+    # median[~np.isfinite(median)] = -9999
+
+        # print(window.row_off, window.row_off + window.height, window.col_off,window.col_off + window.width)
+        # if write_in_mem:
+        #     for kind, arr in [("median", median), ("count", count), ("nmad", nmad)]:
+        #         stacks[kind][
+        #             window.row_off : window.row_off + window.height,
+        #             window.col_off : window.col_off + window.width,
+        #         ] = arr
+        # else:
+    for kind, arr in [("median", median), ("nmad", nmad), ("count", count), ("doy", doy)]:
+        if dtypes[kind] == "float32":
+            arr = np.where(np.isfinite(arr), arr, -9999)
+
+        with rasterio.open(temp_paths[kind], "w", **write_params(kind=kind)) as raster:
+            raster.write(arr, 1)
+
+        shutil.move(temp_paths[kind], output_paths[kind])
+
+            
+        # if dtypes[kind] == "uint8":
+        #     out_rasters[kind].write(arr, 1, window=window)
+        # else:
+        #     out_rasters[kind].write(, 1, window=window)
+
+    if progress_bar is not None:
+        progress_bar.update()
+        
 
 def create_median_stack(
     years: int | list[int] | None = 2021,
     n_threads: int | None = None,
     region: str = "recherchefront",
     raster_type: str = "dem",
-    outlier_threshold: float = 0.75,
+    outlier_threshold: float = 0.95,
     verbose: bool = True,
     write_in_mem: bool = False,
 ):
-    import threading
     import rasterio as rio
     import rasterio.transform
     import shapely.geometry
     import contextlib
     import random
     import concurrent.futures
+    from osgeo import gdal
 
     import adsvalbard.arcticdem
     import adsvalbard.utilities
+    import adsvalbard.rasters
     temp_dir = CONSTANTS.temp_dir.with_stem("temp.svalbard")
 
     if raster_type == "dhdt":
         raster_dir = temp_dir.joinpath("dhdt")
     elif raster_type == "dem":
         raster_dir = temp_dir.joinpath("arcticdem_coreg")
+    elif raster_type == "dem_noncoreg":
+        raster_dir = temp_dir / "arcticdem_vrts"
 
     else:
         raise NotImplementedError(f"Unknown raster type: {raster_type}")
@@ -749,28 +893,26 @@ def create_median_stack(
     filt_str = f"filt_{str(int(outlier_threshold * 100)).zfill(3)}"
 
     if raster_type == "dhdt":
-        output_path = raster_dir / f"medians/{region}/dhdt/median_{filt_str}_dhdt{ext}.tif"
+        output_path = raster_dir / f"medians/{region}/dhdt/median_{filt_str}_dhdt{ext}.vrt"
         v_clip = 250 / (2021 - 2009)
         pattern = "*_dhdt.tif"
         # raster_files = []
         # for directory in dirs:
         #     raster_files += list(directory.glob(pattern))
     elif raster_type == "dem":
-        output_path = temp_dir / f"medians/{region}/dem/median_{filt_str}_dem{ext}.tif"
+        output_path = temp_dir / f"medians/{region}/dem/median_{filt_str}_dem{ext}.vrt"
         v_clip = 1500
         pattern = "*_dem_coreg.tif"
+        dirs = [raster_dir]
+    elif raster_type == "dem_noncoreg":
+        output_path = temp_dir / f"medians/{region}/dem_noncoreg/median_dem{ext}.vrt"
+        v_clip = 1500
+        pattern = "*_dem_epsg32633_5.0m.vrt"
+        outlier_threshold = None
+        dirs = [raster_dir]
+
     else:
         raise NotImplementedError(f"Unknown raster type: {raster_type}")
-
-    raster_files = list(
-        filter(
-            lambda fp: int(fp.stem.split("_")[3][:4]) in years,
-            raster_dir.rglob(pattern),
-        )
-    )
-
-    # if output_path.is_file():
-    #     return output_path
 
     res = CONSTANTS.res
     bounds_dict = CONSTANTS.regions[region]
@@ -780,19 +922,164 @@ def create_median_stack(
 
     crs = rio.CRS.from_epsg(CONSTANTS.crs_epsg)
 
-    block_size = [512 * 6] * 2
+    block_size = [512 * 7] * 2
+
+    n_col_chunks = int(np.ceil(shape[1] / block_size[0]))
+    n_row_chunks = int(np.ceil(shape[0] / block_size[0]))
+    n_zero_pads = int(np.ceil(np.log10(max(n_col_chunks, n_row_chunks))) + 1)
+
+    chunks = []
+    for i, chunk_bounds in enumerate(adsvalbard.rasters.generate_raster_chunks(bounds=bounds, res=res, chunksize=block_size[0])):
+        col = i % n_col_chunks
+        row = int((i - col) / n_col_chunks) 
+
+        shape = adsvalbard.utilities.shape_from_bounds_res(chunk_bounds, [res] * 2)
+
+        chunks.append(
+            {
+                "filepath": output_path.parent / f"{output_path.stem}_chunks_{block_size[0]}/chunk_{str(row).zfill(n_zero_pads)}_{str(col).zfill(n_zero_pads)}.tif",
+                "bounds": chunk_bounds,
+                "input_filepaths": {},
+            }
+        )
+
+
+    centerpoint = 549457, 8641637
+    centerpoint = 654172, 8883410
+    def sort_chunk(chunk):
+
+        easting = np.mean([chunk["bounds"].right, chunk["bounds"].left])
+        northing = np.mean([chunk["bounds"].top, chunk["bounds"].bottom])
+
+        return ((easting - centerpoint[0]) ** 2 + (northing - centerpoint[1]) ** 2) ** 2
+
+    # def sort_chunk(chunk):
+
+    #     easting = np.mean([chunk["bounds"].right, chunk["bounds"].left])
+    #     northing = np.mean([chunk["bounds"].top, chunk["bounds"].bottom])
+
+    #     return ((easting - 673248) ** 2 + (northing - 8901729) ** 2) ** 2
+    # chunks.sort(key=sort_chunk)
+    # chunks = chunks[:1]
+
+    chunks_to_process = [chunk for chunk in chunks if not chunk["filepath"].is_file()]
+
+    chunks_to_process.sort(key=sort_chunk)
+    # chunks_to_process = []
+    # easting, northing = 549457, 8641637
+    # for chunk in chunks:
+    #     if all(
+    #         [
+    #             chunk["bounds"].left < easting,
+    #             chunk["bounds"].right > easting,
+    #             chunk["bounds"].bottom < northing,
+    #             chunk["bounds"].top > northing
+    #         ]
+    #     ):
+    #         chunks_to_process.append(chunk)
+
+    # print(chunks[:2])
+    # print(n_row_chunks, n_col_chunks, n_zero_pads)
+
+    # return
+
+    # raster_files = list(
+    #     filter(
+    #         lambda fp: int(fp.stem.split("_")[3][:4]) in years,
+    #         raster_dir.rglob(pattern),
+    #     )
+    # )
+
+    # if output_path.is_file():
+    #     return output_path
+
 
     # strips = get_strips()
     strips = adsvalbard.arcticdem.get_strips("svalbard")
+    strips = strips[pd.to_datetime(strips["datetime"]).dt.year.isin(years)]
 
-    titles = {
-        r_path.stem[: r_path.stem.index("_seg") + 5]: r_path for r_path in raster_files
-    }
+    # print(strips)
+    # return
 
-    locks = {path: threading.Lock() for path in titles.values()}
+    # titles = {
+    #     r_path.stem[: r_path.stem.index("_seg") + 5]: r_path for r_path in raster_files
+    # }
 
-    write_lock = threading.Lock()
-    output_path.parent.mkdir(exist_ok=True, parents=True)
+    # locks = {path: threading.Lock() for path in titles.values()}
+
+    # write_lock = threading.Lock()
+
+    if len(chunks_to_process) > 0:
+        chunks_to_process[-1]["filepath"].parent.mkdir(exist_ok=True, parents=True)
+
+    locks = {}
+    for chunk in chunks_to_process:
+        overlapping_strips: gpd.GeoDataFrame = strips[strips.intersects(shapely.geometry.box(*chunk["bounds"]))]
+
+        for _, strip in overlapping_strips.iterrows():
+            for raster_dir in dirs:
+                filepath = raster_dir / f"{strip.title}{pattern.replace('*', '')}"
+
+                if not filepath.is_file():
+                    # warnings.warn(f"{filepath} is missing.")
+                    continue
+
+                if filepath not in locks:
+                    locks[filepath] = threading.Lock()
+
+                chunk["input_filepaths"][filepath] = locks[filepath]
+                # chunk["input_filepaths"].append(c
+
+                 
+           # filepaths = Path(
+           #
+        
+        # print(overlapping_strips.iloc[0])
+        #
+
+    with tqdm.tqdm(total=len(chunks_to_process)) as progress_bar:
+        funcs = []
+        for chunk in chunks_to_process:
+            funcs.append(
+                functools.partial(
+                    process_chunk,
+                    **chunk,
+                    res=res,
+                    crs=crs,
+                    outlier_threshold=outlier_threshold,
+                    v_clip=v_clip,
+                    outlier_proba_dir=temp_dir / "outlier_proba",
+                    progress_bar=progress_bar,
+                )
+            )
+
+        if n_threads == 1 or len(chunks_to_process) == 1:
+            for func in funcs:
+                func()
+        else:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=n_threads) as executor,warnings.catch_warnings():
+                warnings.filterwarnings("ignore", message=".*All-NaN slice.*")
+                list(executor.map(lambda f: f(), funcs))
+
+
+    kinds = ["median", "nmad", "count", "doy"]
+
+    gdal.UseExceptions()
+    for kind in kinds:
+        out_path = output_path.with_stem(output_path.stem + (f"_{kind}" if kind != "median" else ""))
+
+        chunk_paths = []
+        for chunk in chunks:
+            chunk_path = chunk["filepath"].with_stem(chunk["filepath"].stem + (f"_{kind}" if kind != "median" else "")).absolute()
+            if not chunk_path.is_file():
+                continue
+            chunk_paths.append(str(chunk_path))
+
+        gdal.BuildVRT(str(out_path), chunk_paths)
+
+        
+
+    return
 
     window_infos = []
     for col_off in np.arange(0, shape[1], step=block_size[0]):
@@ -850,6 +1137,7 @@ def create_median_stack(
         
     # write_params = dict(
     # )
+    #
 
     dtypes = {"median": "float32", "count": "uint8", "nmad": "float32"}
     output_paths = {"median": output_path}
@@ -976,3 +1264,154 @@ def create_median_stack(
         shutil.move(temp_paths[kind], output_paths[kind])
 
     return output_path
+
+
+def hypsometric(bin_size: int = 5):
+    import adsvalbard.outlines
+    all_outlines = gpd.read_file("shapes/glacier_outlines.sqlite")
+    all_outlines["area_km2"] = all_outlines["geometry"].area / 1e6
+    all_outlines.sort_values("area_km2", inplace=True)
+
+    dem_paths = {year: Path(f"temp.svalbard/stacks/median_dems_heerland/median_dem_heerland_{year}.tif") for year in range(2012, 2024)}
+
+    replace_chars = {"ø": "o", "å": "a", " ": "_", "š": "s"}
+
+    vals = []
+
+    paths = {}
+    for glacier, outlines in tqdm.tqdm(all_outlines.groupby("glac_name", sort=False)):
+        if glacier != "Penckbreen":
+            continue
+        # print(outlines.iloc[0])
+        glacier_id = str(glacier.lower())
+        for c in replace_chars:
+            glacier_id = glacier_id.replace(c, replace_chars[c])
+
+        cache_path = Path(f"cache/hypsometric/hypso_{glacier_id}.nc")
+
+        paths[glacier_id] = cache_path
+
+        if cache_path.is_file():
+            continue
+        # if glacier != "Tinkarpbreen":
+        #     continue
+        masks = adsvalbard.outlines.generate_masks(outlines=outlines, frequency="YS")
+        masks.coords["year"] = masks.coords["time"].dt.year
+        masks = masks.swap_dims(time="year")
+
+        masks.isel(year=-1).plot()
+        plt.show()
+        return
+
+        with rasterio.open("temp/npi_mosaic.vrt") as raster:
+            window = rasterio.windows.from_bounds(
+                *masks.attrs["bounds"], raster.transform
+            )
+            npi_dem = raster.read(1, window=window, boundless=True, masked=True).filled(np.nan)
+
+        elev_bins = np.linspace(np.nanmin(npi_dem), np.nanmax(npi_dem), bin_size + 1)
+        elev_bins_orig = elev_bins.copy()
+
+        elev_idx = np.digitize(npi_dem, elev_bins)
+
+        del npi_dem
+
+        out = xr.Dataset(coords={"elev_i": np.arange(elev_bins.shape[0] - 1), "year": list(dem_paths.keys())[1:]})
+        out["elev"] = "elev_i", elev_bins_orig[1:] + (elev_bins_orig[1] - elev_bins_orig[0]) / 2
+
+        for ext in ["dhdt", "dhdt2"]:
+            for key in ["nmad", "median"]:
+                out[f"{key}_{ext}"] = ("year", "elev_i"), np.empty((out["year"].shape[0], out["elev_i"].shape[0]), dtype="float32") + np.nan
+            out[f"count_{ext}"] = ("year", "elev_i"), np.zeros((out["year"].shape[0], out["elev_i"].shape[0]), dtype="uint32")
+
+        dem_prev = np.empty((0,))
+        diff_prev = dem_prev.copy()
+        for i, (year, filepath) in enumerate(dem_paths.items()):
+            with rasterio.open(filepath) as raster:
+                window = rasterio.windows.from_bounds(
+                    *masks.attrs["bounds"], raster.transform
+                )
+
+                dem = raster.read(1, window=window, boundless=True, masked=True).filled(np.nan)
+
+                if i == 0:
+                    dem_prev = dem
+                    continue
+
+                diff = dem - dem_prev
+
+                if i > 1:
+                    acc = (diff - diff_prev) / 2
+                else:
+                    acc = diff_prev.copy()
+
+                for idx in np.arange(1, elev_bins.shape[0]):
+
+                    for arr, ext in [(diff, "dhdt"), (acc, "dhdt2")]:
+                        if arr.shape[0] == 0:
+                            continue
+
+                        arr_sub = arr[elev_idx == idx]
+                        arr_sub = arr_sub[np.isfinite(arr_sub)]
+
+                        if arr_sub.shape[0] == 0:
+                            continue
+
+                        median = np.median(arr_sub)
+                        key = {"year": year, "elev_i": idx - 1}
+                        out[f"median_{ext}"].loc[key] = median
+                        out[f"nmad_{ext}"].loc[key] = 1.4826 * np.median(np.abs(arr_sub - median))
+                        out[f"count_{ext}"].loc[key] = arr_sub.shape[0]
+
+
+                dem_prev = dem
+                diff_prev = diff
+
+
+        out["dh_offset"] = (out["median_dhdt"] - out["median_dhdt"].isel(elev_i=-1)).rolling(year=3, center=True, min_periods=1).mean()
+
+        temp_path = cache_path.with_suffix(".nc.tmp")
+
+        temp_path.parent.mkdir(exist_ok=True, parents=True)
+        out.to_netcdf(temp_path, encoding={v: {"zlib": True, "complevel": 9} for v in out.data_vars}, engine="h5netcdf")
+        shutil.move(temp_path, cache_path)
+        # vals.append(out["dh_offset"].where(out["dh_offset"] >= 0).max().item())
+
+        # print(out.set_coords("elev")["dh_offset"].swap_dims(elev_i="elev").plot(cmap="RdBu"))
+        # plt.title(glacier)
+        # plt.show()
+
+    all_data = []
+    for i, (glacier_id, filepath) in enumerate(paths.items()):
+        with xr.open_dataset(filepath) as data:
+            data = data.expand_dims("glacier_i")
+            data.coords["glacier_i"] = "glacier_i", [i]
+
+            data["glacier_id"] = "glacier_i", [glacier_id]
+
+            all_data.append(data)
+
+    data = xr.combine_nested(all_data, "glacier_i")
+
+    print(data)
+
+    max_dh = data["dh_offset"].max(["year", "elev_i"]).values
+    max_dh = max_dh[max_dh > 0]
+
+    plt.hist(np.log10(max_dh), bins=10)
+    xticks = plt.gca().get_xticks()
+    plt.xticks(xticks, np.round(10 ** xticks, 2))
+    plt.show()
+
+    print(max_dh)
+
+    # plt.hist(vals, bins=10)
+    # plt.show()
+
+
+
+            
+
+        
+
+    
