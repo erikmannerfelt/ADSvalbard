@@ -2,6 +2,10 @@ import geopandas as gpd
 import pandas as pd
 import rasterio as rio
 import numpy as np
+import numpy as np
+from rasterio.features import rasterize
+from rasterio.transform import Affine, array_bounds
+from scipy.ndimage import distance_transform_edt
 
 import scipy.interpolate
 
@@ -90,280 +94,6 @@ def get_uncorr_bias(year: int = 2024):
     axes[1].imshow(model(np.column_stack((xx.ravel(), yy.ravel()))).reshape(xx.shape), vmin=-40, vmax=10, extent=[bounds[0], bounds[2], bounds[1], bounds[3]])
     plt.show()
 
-import numpy as np
-
-def fit_trend_and_corr(data):
-    """
-    data: (nx, ny, nt), Δt = 1 along axis=-1
-    Modifies data in-place: NaNs/inf -> 0.
-    Returns slope, intercept, r (each (nx, ny)).
-    """
-    nt = data.shape[-1]
-    t = np.arange(nt, dtype=data.dtype)
-    t2 = t * t
-
-    mask = np.isfinite(data)
-    # data[~mask] = 0.0
-    data = np.where(mask, data, 0.0)
-
-    # w[~mask] = 0.
-    w = mask.astype(float)
-
-    # basic sums
-    S_w  = w.sum(axis=-1)
-    S_y  = (w * data).sum(axis=-1)
-    S_yy = (w * data**2).sum(axis=-1)
-
-    # time-weighted sums via tensordot (no big broadcasts)
-    S_t  = np.tensordot(w,        t,  axes=([-1], [0]))
-    S_tt = np.tensordot(w,        t2, axes=([-1], [0]))
-    S_ty = np.tensordot(w * data, t,  axes=([-1], [0]))
-
-    with np.errstate(invalid="ignore", divide="ignore"):
-        t_mean = S_t / S_w
-        y_mean = S_y / S_w
-
-        var_t  = S_tt - S_t**2 / S_w
-        var_y  = S_yy - S_y**2 / S_w
-        cov_ty = S_ty - S_t * S_y / S_w
-
-        slope = cov_ty / var_t
-        intercept = y_mean - slope * t_mean
-        r = cov_ty / np.sqrt(var_t * var_y)
-
-    invalid = (
-        (S_w < 2) |
-        (var_t <= 0) |
-        (var_y <= 0) |
-        ~np.isfinite(r)
-    )
-    slope[invalid] = np.nan
-    intercept[invalid] = np.nan
-    r[invalid] = np.nan
-
-    return slope, intercept, r
-
-import numpy as np
-
-def weighted_robust_trend(data, flags, outlier_sigma=3.0):
-    """
-    data:  (nx, ny, nt), may contain NaNs/infs
-    flags: (nx, ny, nt), 1=good, 2=medium, 3=maybe bad (int or float)
-    Δt = 1 along axis=-1.
-
-    Returns:
-        slope, intercept, r  (each (nx, ny))
-    """
-
-    nx, ny, nt = data.shape
-    t = np.arange(nt, dtype=float)
-    t2 = t * t
-
-    # --- base weights from flags (you can tweak this mapping) ---
-    # Example: 1 -> 1.0, 2 -> 0.5, 3 -> 0.1
-    base_w = np.where(flags == 1, 1.0,
-              np.where(flags == 2, 0.5,
-              np.where(flags == 3, 0.1, 0.0)))
-
-    # ignore non-finite data
-    mask = np.isfinite(data)
-    y = np.where(mask, data, 0.0)
-    w = np.where(mask, base_w, 0.0)
-
-    def fit_with_weights(y, w):
-        # All shapes: y,w -> (nx,ny,nt)
-        S_w  = w.sum(axis=-1)
-        S_y  = (w * y).sum(axis=-1)
-        S_yy = (w * y**2).sum(axis=-1)
-
-        S_t  = np.tensordot(w,      t,  axes=([-1], [0]))
-        S_tt = np.tensordot(w,      t2, axes=([-1], [0]))
-        S_ty = np.tensordot(w * y,  t,  axes=([-1], [0]))
-
-        with np.errstate(invalid="ignore", divide="ignore"):
-            t_mean = S_t / S_w
-            y_mean = S_y / S_w
-
-            var_t  = S_tt - S_t**2 / S_w
-            var_y  = S_yy - S_y**2 / S_w
-            cov_ty = S_ty - S_t * S_y / S_w
-
-            slope = cov_ty / var_t
-            intercept = y_mean - slope * t_mean
-            r = cov_ty / np.sqrt(var_t * var_y)
-
-        invalid = (
-            (S_w <= 0) |
-            (var_t <= 0) |
-            (var_y <= 0) |
-            ~np.isfinite(r)
-        )
-        slope[invalid] = np.nan
-        intercept[invalid] = np.nan
-        r[invalid] = np.nan
-
-        return slope, intercept, r
-
-    # ---------- 1st pass: basic weighted least squares ----------
-    slope1, intercept1, _ = fit_with_weights(y, w)
-
-    # ---------- Outlier detection (per-pixel, over time) ----------
-    # residuals: (nx,ny,nt)
-    res = y - (slope1[..., None] * t + intercept1[..., None])
-
-    # Only consider points with positive base weight
-    valid = (w > 0)
-    # simple robust scale: per-pixel std of residuals over time
-    # (could swap for MAD if you want more robustness)
-    with np.errstate(invalid="ignore"):
-        # compute std ignoring zero-weighted points
-        res2 = np.where(valid, res, np.nan)
-        sigma = np.nanstd(res2, axis=-1)    # (nx,ny)
-
-    # avoid zero sigma
-    sigma = np.where(sigma <= 0, np.nan, sigma)
-
-    # mark outliers: |res| > outlier_sigma * sigma
-    # sigma[..., None] broadcasts over time
-    outliers = np.abs(res) > (outlier_sigma * sigma[..., None])
-
-    # down-weight or drop outliers
-    # simplest: drop them completely
-    w2 = np.where(outliers, 0.0, w)
-
-    # ---------- 2nd pass: refit with updated weights ----------
-    slope, intercept, r = fit_with_weights(y, w2)
-
-    return slope, intercept, r
-import numpy as np
-
-def fit_trend_and_corr_1d(data):
-    """
-    data: array of shape (nx, nt)
-          NaNs / infs are ignored.
-    Δt = 1 along axis=-1.
-
-    Returns:
-        slope   : (nx,)
-        intercept : (nx,)
-        r       : (nx,)  Pearson correlation between t and data
-    """
-    nx, nt = data.shape
-    t = np.arange(nt, dtype=float)
-    t2 = t * t
-
-    # mask of finite values
-    mask = np.isfinite(data)
-    y = np.where(mask, data, 0.0)
-    w = mask.astype(float)        # 0/1 weights
-
-    # 1D sums along time
-    S_w  = w.sum(axis=-1)                     # (nx,)
-    S_y  = (w * y).sum(axis=-1)              # (nx,)
-    S_yy = (w * y**2).sum(axis=-1)           # (nx,)
-
-    # time‑weighted sums
-    S_t  = np.dot(w,  t)                     # (nx,)
-    S_tt = np.dot(w,  t2)                    # (nx,)
-    S_ty = np.dot(w * y, t)                  # (nx,)
-
-    with np.errstate(invalid="ignore", divide="ignore"):
-        t_mean = S_t / S_w
-        y_mean = S_y / S_w
-
-        var_t  = S_tt - S_t**2 / S_w
-        var_y  = S_yy - S_y**2 / S_w
-        cov_ty = S_ty - S_t * S_y / S_w
-
-        slope = cov_ty / var_t
-        intercept = y_mean - slope * t_mean
-        r = cov_ty / np.sqrt(var_t * var_y)
-
-    invalid = (
-        (S_w < 2) |
-        (var_t <= 0) |
-        (var_y <= 0) |
-        ~np.isfinite(r)
-    )
-    slope[invalid] = np.nan
-    intercept[invalid] = np.nan
-    r[invalid] = np.nan
-
-    return slope, intercept, r
-
-# import numpy as np
-
-# def fit_trend_corr_nmad_1d(data, eps=1e-12):
-#     """
-#     data: array of shape (nx, nt)
-#           NaNs / infs are ignored.
-#     Δt = 1 along axis=-1.
-
-#     Returns:
-#         slope     : (nx,)
-#         intercept : (nx,)
-#         r         : (nx,)  Pearson correlation between t and data
-#         nmad      : (nx,)  NMAD of residuals
-#     """
-#     nx, nt = data.shape
-#     t = np.arange(nt, dtype=data.dtype)
-#     t2 = t * t
-
-#     # mask of finite values
-#     mask = np.isfinite(data)
-#     y = np.where(mask, data, 0.0)
-#     w = mask.astype(data.dtype)        # 0/1 weights
-
-#     # 1D sums along time
-#     S_w  = w.sum(axis=-1)                     # (nx,)
-#     S_y  = (w * y).sum(axis=-1)              # (nx,)
-#     S_yy = (w * y**2).sum(axis=-1)           # (nx,)
-
-#     # time‑weighted sums
-#     S_t  = np.dot(w,  t)                     # (nx,)
-#     S_tt = np.dot(w,  t2)                    # (nx,)
-#     S_ty = np.dot(w * y, t)                  # (nx,)
-
-#     with np.errstate(invalid="ignore", divide="ignore"):
-#         t_mean = S_t / S_w
-#         y_mean = S_y / S_w
-
-#         var_t  = S_tt - S_t**2 / S_w
-#         var_y  = S_yy - S_y**2 / S_w
-#         cov_ty = S_ty - S_t * S_y / S_w
-
-#         slope = cov_ty / var_t
-#         intercept = y_mean - slope * t_mean
-#         r = cov_ty / np.sqrt(var_t * var_y)
-
-#         # residuals for NMAD
-#         # model prediction: shape (nx, nt)
-#         y_fit = slope[:, None] * t + intercept[:, None]
-#         res = np.where(mask, y - y_fit, np.nan)   # ignore invalid points
-
-#     with warnings.catch_warnings():
-#         warnings.filterwarnings("ignore")
-#         # per‑row robust sigma via NMAD
-#         med_res = np.nanmedian(res, axis=-1)      # (nx,)
-#         abs_dev = np.abs(res - med_res[:, None])
-#         nmad = 1.4826 * np.nanmedian(abs_dev, axis=-1)
-
-#     invalid = (
-#         (S_w < 2) |
-#         (var_t <= eps) |
-#         (var_y <= eps)
-#         # (var_y <= 0)# |
-#         # ~np.isfinite(r)
-#     )
-#     slope[invalid] = np.nan
-#     intercept[invalid] = np.nan
-#     r[invalid] = np.nan
-#     nmad[invalid] = np.nan
-
-#     return slope, intercept, r, nmad
-
-# import numpy as np
-
 def fit_trend_corr_nmad_1d(data, eps=1e-12):
     """
     data: array of shape (nx, nt)
@@ -377,12 +107,12 @@ def fit_trend_corr_nmad_1d(data, eps=1e-12):
         nmad      : (nx,)  NMAD of residuals
     """
     nx, nt = data.shape
-    t = np.arange(nt, dtype=float)
+    t = np.arange(nt, dtype=data.dtype)
     t2 = t * t
 
     mask = np.isfinite(data)
     y = np.where(mask, data, 0.0)
-    w = mask.astype(float)
+    w = mask.astype(data.dtype)
 
     S_w  = w.sum(axis=-1)           # (nx,)
     S_y  = (w * y).sum(axis=-1)
@@ -427,9 +157,9 @@ def fit_trend_corr_nmad_1d(data, eps=1e-12):
 
     # --- Only mark as invalid when really no usable trend info ---
     invalid = (
-        (S_w < 2) |
-        (var_t <= eps) |
-        ~np.isfinite(r)
+        (S_w < 2) 
+        # (var_t <= eps)# |
+        # ~np.isfinite(r)
     )
     slope[invalid] = np.nan
     intercept[invalid] = np.nan
@@ -444,12 +174,13 @@ def fit_trend(dems, flags):
     slope, intercept, r, nmad = fit_trend_corr_nmad_1d(dems)
 
     for threshold in [1.5, 4]:
+        print(nmad.dtype)
         for i in range(dems.shape[-1]):
             bad = (nmad > threshold) | (~np.isfinite(nmad))
 
             if np.count_nonzero(bad) == 0:
                 break
-            print(f"Improving trend for {np.count_nonzero(bad)} pixels")
+            # print(f"Improving trend for {np.count_nonzero(bad)} pixels")
 
             bad_rows = np.where(bad)[0]
 
@@ -462,6 +193,8 @@ def fit_trend(dems, flags):
             if np.count_nonzero(improved) == 0:
                 continue
 
+            print(f"Improved trend for {np.count_nonzero(improved)} pixels by excluding {i} at {threshold=}")
+
             improved_rows = bad_rows[improved]
 
             slope[improved_rows] = new_slope[improved]
@@ -471,18 +204,32 @@ def fit_trend(dems, flags):
 
     return slope, intercept, r, nmad
 
-def load_and_mosaic_dem(chunk_nr: str, chunksize: int, year: int):
+
+def get_dem_chunk_path(kind: str, chunk_nr: str, chunksize: int, year: int) -> Path:
+    stack_dir = Path("temp.svalbard/medians/svalbard/")
+
+    # Translate e.g. p95 to 095
+    if len(kind) == 3 and kind.startswith("p"):
+        kind = "0" + kind[1:]
+
+    if kind == "uncorr":
+        return stack_dir / f"dem_noncoreg/median_dem_{year}_chunks_{chunksize}/chunk_{chunk_nr}.tif"
+
+    return stack_dir / f"dem/median_filt_{kind}_dem_{year}_chunks_{chunksize}/chunk_{chunk_nr}.tif"
+
+def load_and_mosaic_dem(chunk_nr: str, chunksize: int, year: int, return_uncorr: bool = False):
     stack_dir = Path("temp.svalbard/medians/svalbard/")
     nmad_thresholds = {
         "p95": 10.,
         "p75": 30.,
         "uncorr": 30.,
     }
-    paths = {
-        "p95": stack_dir / f"dem/median_filt_095_dem_{year}_chunks_{chunksize}/chunk_{chunk_nr}.tif",
-        "uncorr": stack_dir / f"dem_noncoreg/median_dem_{year}_chunks_{chunksize}/chunk_{chunk_nr}.tif",
-    }
-    paths["p75"] = paths["p95"].parent.with_stem(paths["p95"].parent.stem.replace("095", "075")) / paths["p95"].name
+    paths = {kind: get_dem_chunk_path(kind, chunk_nr=chunk_nr, chunksize=chunksize, year=year) for kind in ["p95", "p75", "uncorr"]}
+    # paths = {
+    #     "p95": ,
+    #     "uncorr": stack_dir / f"dem_noncoreg/median_dem_{year}_chunks_{chunksize}/chunk_{chunk_nr}.tif",
+    # }
+    # paths["p75"] = paths["p95"].parent.with_stem(paths["p95"].parent.stem.replace("095", "075")) / paths["p95"].name
     for key in list(paths.keys()):
         paths[f"{key}_nmad"] = paths[key].with_stem(paths[key].stem + "_nmad")
 
@@ -492,33 +239,334 @@ def load_and_mosaic_dem(chunk_nr: str, chunksize: int, year: int):
         meta = raster.meta
         quality_flag = np.ones((raster.height, raster.width), dtype="uint8")
         dem = np.empty(quality_flag.shape, dtype=raster.dtypes[0]) + np.nan
+        nmad = dem.copy()
+        count = quality_flag.copy()
+        doy = quality_flag.copy().astype("uint16")
         xx, yy = np.meshgrid(np.linspace(raster.bounds.left, raster.bounds.right, raster.width), np.linspace(raster.bounds.bottom, raster.bounds.top, raster.height)[::-1])
 
+    uncorr_dem = {}
+
+    prev_mask = np.zeros(dem.shape, dtype=bool)
     for i, key in enumerate(["p75", "p95", "uncorr"], start=1):
         # if i == 3:
         #     continue
-        with rio.open(paths[f"{key}_nmad"]) as raster:
-            nmad = raster.read(1, masked=True).filled(1000)   
+        with rio.open(paths[key].with_stem(paths[key].stem + "_nmad")) as raster:
+            new_nmad = raster.read(1, masked=True).filled(np.nan)   
+
+        mask = (~prev_mask) & (new_nmad < nmad_thresholds[key])
+
+        if np.count_nonzero(mask) == 0:
+            continue
+
+        prev_mask = prev_mask | mask
+
+        nmad[mask] = new_nmad[mask]
+        quality_flag[mask] = i
+        if return_uncorr:
+            uncorr_dem["nmad"] = new_nmad
+
+        # with rio.open(paths[key].with_stem(paths[key].stem + "_count")) as raster:
+        #     arr = raster.read(1, masked=True).filled(0)
+        #     count[mask] = arr[mask]
+        #     if return_uncorr:
+        #         uncorr_dem["count"] = arr
+
+        # with rio.open(paths[key].with_stem(paths[key].stem + "_doy")) as raster:
+        #     arr = raster.read(1, masked=True).filled(0)
+        #     doy[mask] = arr[mask]
+        #     if return_uncorr:
+        #         uncorr_dem["doy"] = arr
 
         with rio.open(paths[key]) as raster:
-            mask = (~np.isfinite(dem)) & (nmad < nmad_thresholds[key])
-            dem = np.where(
-                mask,
-                raster.read(1, masked=True).filled(np.nan),
-                dem,
-            )
-            quality_flag[mask] = i
+            arr = raster.read(1, masked=True).filled(np.nan)
+            dem[mask] = arr[mask]
+            if return_uncorr:
+                uncorr_dem["dem"] = arr
 
         if key == "uncorr":
-            dem[mask] += get_uncorr_bias(year=year)(np.column_stack((xx.ravel(), yy.ravel()))[mask.ravel()])
+            if return_uncorr:
+                bias = get_uncorr_bias(year=year)(np.column_stack((xx.ravel(), yy.ravel())))
+                uncorr_dem["dem"][...] += bias
+                dem[mask] += bias[mask.ravel()]
+            else:
+                dem[mask] += get_uncorr_bias(year=year)(np.column_stack((xx.ravel(), yy.ravel()))[mask.ravel()])
 
     quality_flag[~np.isfinite(dem)] = 0
 
     return {
         "dem": dem,
         "quality_flag": quality_flag,
+        "count": count,
+        "nmad": nmad,
+        "doy": doy,
         "meta": meta,
+        "uncorr_dem": uncorr_dem,
     }
+
+def write_formatted(key, fp, arr, params):
+    shape = params["height"], params["width"]
+
+    fp.parent.mkdir(exist_ok=True, parents=True)
+    scale = 1
+    offset = 0
+    nodata = -9999.
+
+    if arr.dtype in ["uint8", "uint16"]:
+        nodata = 0
+
+    if "_dem" in key or "nmad" in key or key.startswith("intercept_"):
+        umax = 65534
+        vmax = 100. if key.startswith("nmad_") else 1500.
+        arr = np.where(
+            np.isfinite(arr),
+            np.clip((arr * (umax / vmax)), a_min=0, a_max=umax),
+            umax + 1
+        ).astype("uint16")
+        scale = vmax / umax
+        nodata = umax + 1
+    elif key.startswith("r_"):
+        umax = 127
+        offset = -127
+        arr = np.where(
+            np.isfinite(arr),
+            np.clip((arr * (umax / 1.)) - offset, a_min=0, a_max=umax),
+            umax + 1
+        ).astype("uint8")
+        scale = 1. / umax
+        nodata = umax + 1
+    elif key.startswith("trend_"):
+        info = np.iinfo(np.int16)
+        nodata = info.min
+        umin = info.min + 1
+        umax = info.max - 1
+        vmax = 300
+
+        arr = np.where(
+            np.isfinite(arr),
+            np.clip((arr * (umax / vmax)), a_min=umin, a_max=umax),
+            nodata,
+        ).astype("int16")
+        scale = vmax / umax
+        
+
+    if arr.dtype == "float64":
+        arr = arr.astype("float32")
+
+    meta = params | {
+        "height": shape[0],
+        "width": shape[1],
+        "count": 1,
+        "tiled": True,
+        "compress": "deflate",
+        "zlevel": 9,
+        "dtype": str(arr.dtype),
+        "nodata": nodata,
+    }
+
+    if meta["dtype"] == "float32":
+        meta["predictor"] = 3
+    else:
+        meta["predictor"] = 2
+
+    # if meta["dtype"] == "uint8":
+    #     meta["nodata"] = 0
+    # elif meta["dtype"] == "uint16":
+    #     meta["nodata"] = 65535
+
+
+    # print(key, meta)
+    print(f"Writing {fp}")
+    with rio.open(fp, "w", **meta) as raster:
+        raster.write(arr.reshape(shape), 1)
+        raster.scales = (scale,)
+        raster.offsets = (offset,)
+
+
+
+def compute_weight_field(meta: dict[str, object], bad_regions: gpd.GeoDataFrame, R=1000.0):
+    """
+    Compute weight_B field for a tile, or return None if no blending is needed.
+
+    Returns:
+      - np.ndarray[float32] with shape (H, W) if blending is needed
+      - None if no polygon is within distance R of the tile
+    """
+    gdf = bad_regions
+    sindex = bad_regions.sindex
+    transform = meta["transform"]
+    height = meta["height"]
+    width = meta["width"]
+    # height, width = shape
+
+    # Tile bounds in map coordinates
+    minx, miny, maxx, maxy = array_bounds(height, width, transform)
+
+    # Fast reject: search for polygons within R of tile bbox
+    search_box = (minx - R, miny - R, maxx + R, maxy + R)
+    candidate_idx = list(sindex.intersection(search_box))
+    if not candidate_idx:
+        # No polygons close enough → no blending
+        return None
+
+    polys = gdf.geometry.iloc[candidate_idx]
+
+    # Pixel size (assume square pixels, north-up)
+    pixel_size = abs(transform.a)
+
+    # Margin in pixels for big window
+    m = int(np.ceil(R / pixel_size))
+    big_height = height + 2 * m
+    big_width = width + 2 * m
+
+    # Big transform: shift origin left and down by m pixels
+    t = transform
+    big_transform = Affine(
+        t.a, t.b, t.c - m * t.a,
+        t.d, t.e, t.f - m * t.e
+    )
+
+    # Rasterize polygons on big grid (1 inside, 0 outside)
+    mask_inside_big = rasterize(
+        [(geom, 1) for geom in polys],
+        out_shape=(big_height, big_width),
+        transform=big_transform,
+        fill=0,
+        dtype="uint8",
+    )
+
+    # Distance transform for outside pixels
+    outside = (mask_inside_big == 0)
+    distance_pixels = distance_transform_edt(outside)
+    distance_m_big = distance_pixels * pixel_size
+
+    # Crop back to tile extent
+    mask_inside = mask_inside_big[m:m + height, m:m + width]
+    distance_m = distance_m_big[m:m + height, m:m + width]
+
+    # Compute weight_B
+    weight_B = np.clip(1.0 - distance_m / R, 0.0, 1.0).astype("float32")
+    weight_B[mask_inside == 1] = 1.0
+
+    return weight_B
+
+
+def load_polygons(geojson_path):
+    gdf = gpd.read_file(geojson_path)
+    if gdf.crs is None or gdf.crs.to_epsg() != 32633:
+        gdf = gdf.to_crs("EPSG:32633")
+    sindex = gdf.sindex
+    return gdf, sindex
+
+
+def blend_bands(
+    dem_a, count_a, nmad_a, doy_a,
+    dem_b, count_b, nmad_b, doy_b,
+    weight_B
+):
+    """
+    Blend DEM, count, NMAD, DOY for one tile.
+
+    Nodata assumptions:
+      - dem_a, dem_b, nmad_a, nmad_b: NaN = nodata
+      - count_a, count_b, doy_a, doy_b: 0 = nodata
+      - Nodata masks are consistent across bands.
+    """
+
+    # DEM/NMAD valid mask from DEM (NaN-based)
+    valid_a = np.isfinite(dem_a)
+    valid_b = np.isfinite(dem_b)
+
+    # --- DEM: NaN-aware weighted blend ---
+    dem_out = np.full_like(dem_a, np.nan, dtype=dem_a.dtype)
+
+    mask_both = valid_a & valid_b
+    mask_a_only = valid_a & ~valid_b
+    mask_b_only = valid_b & ~valid_a
+
+    dem_out[mask_both] = (
+        weight_B[mask_both] * dem_b[mask_both]
+        + (1.0 - weight_B[mask_both]) * dem_a[mask_both]
+    )
+    dem_out[mask_a_only] = dem_a[mask_a_only]
+    dem_out[mask_b_only] = dem_b[mask_b_only]
+
+    # --- NMAD: same blending as DEM ---
+    nmad_out = np.full_like(nmad_a, np.nan, dtype=nmad_a.dtype)
+
+    nmad_out[mask_both] = (
+        weight_B[mask_both] * nmad_b[mask_both]
+        + (1.0 - weight_B[mask_both]) * nmad_a[mask_both]
+    )
+    nmad_out[mask_a_only] = nmad_a[mask_a_only]
+    nmad_out[mask_b_only] = nmad_b[mask_b_only]
+
+    # --- COUNT: uint8, use max where both valid ---
+    count_out = np.zeros_like(count_a, dtype="uint8")
+
+    # valid where DEM is valid (consistent masks)
+    # if you prefer, you can additionally require count>0
+    count_out[mask_a_only] = count_a[mask_a_only]
+    count_out[mask_b_only] = count_b[mask_b_only]
+    count_out[mask_both] = np.maximum(
+        count_a[mask_both],
+        count_b[mask_both]
+    ).astype("uint8")
+
+    # --- DOY: uint8, pick from dominant DEM ---
+    doy_out = np.zeros_like(doy_a, dtype="uint16")
+
+    # Only valid where DEM is valid
+    # (assuming 0 = nodata)
+    # Pixels valid only in A or only in B:
+    doy_out[mask_a_only] = doy_a[mask_a_only]
+    doy_out[mask_b_only] = doy_b[mask_b_only]
+
+    # Where both valid: choose based on weight_B
+    dominant_B = mask_both & (weight_B >= 0.5)
+    dominant_A = mask_both & (weight_B < 0.5)
+
+    doy_out[dominant_A] = doy_a[dominant_A]
+    doy_out[dominant_B] = doy_b[dominant_B]
+
+    return dem_out, count_out, nmad_out, doy_out
+
+
+# -----------------------------------------------------------
+# 4. Tile-level function tying everything together
+# -----------------------------------------------------------
+
+def blend_tile(tile_idx, gdf, sindex, R=1000.0):
+    """
+    Blend DEM A and DEM B products for one tile index.
+
+    Returns:
+      dem_out, count_out, nmad_out, doy_out, meta_out
+    """
+
+    # User-provided loading functions (already complex)
+    dem_a, count_a, nmad_a, doy_a, meta_a = load_dem_a(tile_idx)
+    dem_b, count_b, nmad_b, doy_b, meta_b = load_dem_b(tile_idx)
+
+    # weight_B based on polygons and tile geo
+    weight_B = compute_weight_field(
+        meta=meta_a,
+        shape=dem_a.shape,
+        gdf=gdf,
+        sindex=sindex,
+        R=R
+    )
+
+    # Blend all bands
+    dem_out, count_out, nmad_out, doy_out = blend_bands(
+        dem_a, count_a, nmad_a, doy_a,
+        dem_b, count_b, nmad_b, doy_b,
+        weight_B
+    )
+
+    meta_out = meta_a  # same grid, dtype info can be adjusted if needed
+    return dem_out, count_out, nmad_out, doy_out, meta_out
+
+
 
 def mosaic_tile(chunk_nr: str = "018_011", chunksize: int = 512 * 7):
 
@@ -530,6 +578,9 @@ def mosaic_tile(chunk_nr: str = "018_011", chunksize: int = 512 * 7):
         fp = out_dir / f"chunk_{chunk_nr}_{year}.tif"
         out_paths[f"{year}_dem"] = fp
         out_paths[f"{year}_quality"] = fp.with_stem(fp.stem + "_quality")
+        out_paths[f"{year}_doy"] = fp.with_stem(fp.stem + "_doy")
+        out_paths[f"{year}_count"] = fp.with_stem(fp.stem + "_count")
+        out_paths[f"{year}_nmad"] = fp.with_stem(fp.stem + "_count")
 
     for trend, name in [("0", f"{years[0]}-{years[5]}"), ("1", f"{years[6]}-{years[-1]}"), ("full", f"{years[0]}-{years[-1]}")]:
         fp = out_dir / f"chunk_{chunk_nr}_trend_{name}.tif"
@@ -537,78 +588,50 @@ def mosaic_tile(chunk_nr: str = "018_011", chunksize: int = 512 * 7):
         for part in ["r", "intercept", "nmad"]:
             out_paths[f"{part}_{trend}"] = fp.with_stem(fp.stem + f"_{part}")
 
-        
-    # if all(fp.is_file() for fp in out_paths.values()):
-    #     return
+    with rio.open(get_dem_chunk_path("p95", chunk_nr=chunk_nr, chunksize=chunksize, year=2024)) as raster:
+        params = raster.meta
 
-    # for key in out_paths:
-    #     print(key, out_paths[key])
-    # return
-
-    nmad_thresholds = {
-        "p95": 10.,
-        "p75": 30.,
-        "uncorr": 30.,
-    }
-    stack_dir = Path("temp.svalbard/medians/svalbard/")
-
-    params = {}
-
-    years = []
+    bad_regions = gpd.read_file("shapes/bad_coreg_regions.geojson")
+    # params = {}
     dems = []
     flags = []
-
-    for year in range(2013, 2025):
+    for year in years:
         print(year)
-        # if year != 2017:
-        #     continue
-        paths = {
-            "p95": stack_dir / f"dem/median_filt_095_dem_{year}_chunks_{chunksize}/chunk_{chunk_nr}.tif",
-            "uncorr": stack_dir / f"dem_noncoreg/median_dem_{year}_chunks_{chunksize}/chunk_{chunk_nr}.tif",
-        }
-        paths["p75"] = paths["p95"].parent.with_stem(paths["p95"].parent.stem.replace("095", "075")) / paths["p95"].name
-        for key in list(paths.keys()):
-            paths[f"{key}_nmad"] = paths[key].with_stem(paths[key].stem + "_nmad")
 
-        with rio.open(paths["p95"]) as raster:
-            params["transform"] = raster.transform
-            params["crs"] = raster.crs
-            quality_flag = np.ones((raster.height, raster.width), dtype="uint8")
-            dem = np.empty(quality_flag.shape, dtype=raster.dtypes[0]) + np.nan
-            xx, yy = np.meshgrid(np.linspace(raster.bounds.left, raster.bounds.right, raster.width), np.linspace(raster.bounds.bottom, raster.bounds.top, raster.height)[::-1])
+        weights = compute_weight_field(meta=params, bad_regions=bad_regions)
 
-        for i, key in enumerate(["p75", "p95", "uncorr"], start=1):
-            # if i == 3:
-            #     continue
-            with rio.open(paths[f"{key}_nmad"]) as raster:
-                nmad = raster.read(1, masked=True).filled(1000)   
+        out = load_and_mosaic_dem(chunk_nr=chunk_nr, chunksize=chunksize, year=year, return_uncorr=weights is not None)
 
-            with rio.open(paths[key]) as raster:
-                mask = (~np.isfinite(dem)) & (nmad < nmad_thresholds[key])
-                dem = np.where(
-                    mask,
-                    raster.read(1, masked=True).filled(np.nan),
-                    dem,
-                )
-                quality_flag[mask] = i
+        if weights is not None:
+            out["dem"], out["count"], out["nmad"], out["doy"] = blend_bands(
+                dem_a=out["dem"],
+                count_a=out["count"],
+                nmad_a=out["nmad"],
+                doy_a=out["doy"],
+                dem_b=out["uncorr"]["dem"],
+                count_b=out["uncorr"]["count"],
+                nmad_b=out["uncorr"]["nmad"],
+                doy_b=out["uncorr"]["doy"],
+                weight_B=weights,
+            )
+            out["quality_flag"][weights > 0] = 3
 
-            if key == "uncorr":
-                dem[mask] += get_uncorr_bias(year=year)(np.column_stack((xx.ravel(), yy.ravel()))[mask.ravel()])
+        dems.append(out["dem"].ravel()[:, None])
 
-        quality_flag[~np.isfinite(dem)] = 0
+        flags.append(out["quality_flag"].ravel()[:, None])
 
-        years.append(year)
-        flags.append(quality_flag)
-        dems.append(dem)
-
-        # import matplotlib.pyplot as plt
-        # plt.imshow(dem)
-        # plt.show()
-
-
-    shape = dems[0].shape
-    dems = np.reshape(dems, (len(dems), -1)).T
-    flags = np.reshape(flags, (len(flags), -1)).T
+        for key in ["nmad", "count", "doy"]:
+            # write_formatted(
+            #     key,
+            #     out_paths[f"{year}_{key}"],
+            #     out[key],
+            #     params=params,
+            # )
+            del out[key]
+        
+    shape = params["height"], params["width"]
+    dems = np.hstack(dems)
+    flags = np.hstack(flags)
 
     # print("Removing bad timeseries")
     # dems[((flags <= 2).sum(axis=-1)[..., None] >= 2) & (flags == 3)] = np.nan
@@ -616,97 +639,35 @@ def mosaic_tile(chunk_nr: str = "018_011", chunksize: int = 512 * 7):
     data = {}
 
     print("Fitting trend")
-    data["trend_0"], data["intercept_0"], data["r_0"], data["nmad_0"] = fit_trend(dems[:, :6].copy(), flags[:, :6].copy())
-    data["trend_1"], data["intercept_1"], data["r_1"], data["nmad_1"] = fit_trend(dems[:, 6:].copy(), flags[:, 6:].copy())
+    for (key, data_slice) in [("0", slice(0, 6)), ("1", slice(6, None)), ("full", None)]:
+        data[f"trend_{key}"], data[f"intercept_{key}"], data[f"r_{key}"], data[f"nmad_{key}"] = fit_trend(
+            dems[:, data_slice].copy() if data_slice is not None else dems,
+            flags[:, data_slice].copy() if data_slice is not None else flags,
+        )
 
-    data["trend_full"], data["intercept_full"], data["r_full"], data["nmad_full"] = fit_trend(dems.copy(), flags.copy())
+        # import matplotlib.pyplot as plt
+        # fig = plt.figure()
+        # axes = fig.subplots(1, 2, sharex=True, sharey=True)
+        # axes[0].imshow(data[f"trend_{key}"].reshape(shape), vmin=-3, vmax=3, cmap="RdBu")
+        # axes[1].imshow(data[f"nmad_{key}"].reshape(shape), vmin=0, vmax=10)
+        # plt.show()
+        
+    # return
+    # data["trend_0"], data["intercept_0"], data["r_0"], data["nmad_0"] = fit_trend(dems[:, :6].copy(), flags[:, :6].copy())
+    # data["trend_1"], data["intercept_1"], data["r_1"], data["nmad_1"] = fit_trend(dems[:, 6:].copy(), flags[:, 6:].copy())
 
-    for i, year in enumerate(years):
-        data[f"{year}_dem"] = dems[:, i]
-        data[f"{year}_quality"] = flags[:, i]
+    # data["trend_full"], data["intercept_full"], data["r_full"], data["nmad_full"] = fit_trend(dems, flags)
+
+    del dems
+    del flags
+    # for i, year in enumerate(years):
+    #     data[f"{year}_dem"] = dems[:, i]
+    #     data[f"{year}_quality"] = flags[:, i]
 
     
     for key, arr in data.items():
         fp = out_paths[key]
-
-        fp.parent.mkdir(exist_ok=True, parents=True)
-        scale = 1
-        offset = 0
-        nodata = -9999.
-
-        if arr.dtype == "uint8":
-            nodata = 255
-
-        if "_dem" in key or key.startswith("nmad_") or key.startswith("intercept_"):
-            umax = 65534
-            vmax = 100. if key.startswith("nmad_") else 1500.
-            arr = np.where(
-                np.isfinite(arr),
-                np.clip((arr * (umax / vmax)), a_min=0, a_max=umax),
-                umax + 1
-            ).astype("uint16")
-            scale = vmax / umax
-            nodata = umax + 1
-        elif key.startswith("r_"):
-            umax = 127
-            offset = 127
-            arr = np.where(
-                np.isfinite(arr),
-                np.clip((arr * (umax / 1.)) + 127, a_min=0, a_max=umax),
-                umax + 1
-            ).astype("uint8")
-            scale = 1. / umax
-            nodata = umax + 1
-        elif key.startswith("trend_"):
-            info = np.iinfo(np.int16)
-            nodata = info.min
-            umin = info.min + 1
-            umax = info.max - 1
-            vmax = 300
-
-            arr = np.where(
-                np.isfinite(arr),
-                np.clip((arr * (umax / vmax)), a_min=umin, a_max=umax),
-                umax + 1
-            ).astype("int16")
-            scale = vmax / umax
-            
-            
-        elif "_quality" in key:
-            nodata = 0
-
-
-
-        if arr.dtype == "float64":
-            arr = arr.astype("float32")
-
-        meta = params | {
-            "height": shape[0],
-            "width": shape[1],
-            "count": 1,
-            "tiled": True,
-            "compress": "deflate",
-            "zlevel": 9,
-            "dtype": str(arr.dtype),
-            "nodata": nodata,
-        }
-
-        if meta["dtype"] == "float32":
-            meta["predictor"] = 3
-        else:
-            meta["predictor"] = 2
-
-        # if meta["dtype"] == "uint8":
-        #     meta["nodata"] = 0
-        # elif meta["dtype"] == "uint16":
-        #     meta["nodata"] = 65535
-
-
-        print(key, meta)
-        with rio.open(fp, "w", **meta) as raster:
-            raster.write(arr.reshape(shape), 1)
-            raster.scales = (scale,)
-            raster.offsets = (offset,)
+        write_formatted(key=key, fp=fp, arr=arr, params=params)
             
     return
 
