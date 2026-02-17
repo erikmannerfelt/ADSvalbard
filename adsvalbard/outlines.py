@@ -264,7 +264,7 @@ def generate_interpolated_times(start_year: int, end_year: int, freq: str = "MS"
     # print(all_outlines.groupby("glac_name").first().geometry.area.sort_values() / 1e6)
 
 
-def generate_masks(outlines: gpd.GeoDataFrame, start_year=2012, end_year=2023):
+def generate_masks(outlines: gpd.GeoDataFrame, start_year=2012, end_year=2023, frequency: str = "YS", progress_bar: bool = False):
     outlines = outlines.sort_values("src_date")
 
     bounds = adsvalbard.utilities.align_bounds(
@@ -272,31 +272,31 @@ def generate_masks(outlines: gpd.GeoDataFrame, start_year=2012, end_year=2023):
     )
 
     # times = pd.arrays.DatetimeArray._from_sequence(pd.DatetimeIndex([f"{start_year}-01-01", f"{end_year}-12-31"], freq="ME"))
-    times = pd.date_range(
-        f"{start_year}-01-01", f"{end_year}-12-31", freq="MS"
+    all_times = pd.date_range(
+        f"{start_year}-01-01", f"{end_year}-12-31", freq=frequency,
     ).to_numpy()
 
     # TODO: Add bfill and ffill
-    times = times[
-        (times > outlines["src_date"].min()) & (times < outlines["src_date"].max())
+    times = all_times[
+        (all_times > outlines["src_date"].min()) & (all_times < outlines["src_date"].max())
     ]
 
     masks = {}
-    for i in tqdm.tqdm(range(1, outlines.shape[0]), total=outlines.shape[0] - 1):
+    for i in tqdm.tqdm(range(1, outlines.shape[0]), total=outlines.shape[0] - 1, disable=(not progress_bar)):
         # if i <= 2:
         #     print("DEBUG: REMOVE THIS")
         #     continue
         outline_0 = outlines.iloc[i - 1]
         outline_1 = outlines.iloc[i]
         times_interp = times[
-            (times > outline_0["src_date"]) & (times < outline_1["src_date"])
+            (times >= outline_0["src_date"]) & (times <= outline_1["src_date"])
         ]
 
         new_masks = interpolate_masks(
             outline_0=outline_0["geometry"],
             outline_1=outline_1["geometry"],
-            time_0=outline_0["src_date"],
-            time_1=outline_1["src_date"],
+            time_0=outline_0["src_date"] - pd.Timedelta(1, "second"),
+            time_1=outline_1["src_date"] + pd.Timedelta(1, "second"),
             times_interp=times_interp,
             res=CONSTANTS.res,
             bounds=bounds,
@@ -310,6 +310,9 @@ def generate_masks(outlines: gpd.GeoDataFrame, start_year=2012, end_year=2023):
             # plt.title(times_interp[j])
             # plt.imshow(mask)
             # plt.show()
+            #
+    if len(masks) == 0:
+        raise ValueError("No masks generated")
 
     shape = adsvalbard.utilities.get_shape(bounds, [CONSTANTS.res] * 2)
     eastings, northings = adsvalbard.utilities.generate_eastings_northings(
@@ -324,6 +327,10 @@ def generate_masks(outlines: gpd.GeoDataFrame, start_year=2012, end_year=2023):
             ("x", eastings[0, :]),
         ],
     )
+    # This acts as a bfill/ffill because the only potentially missing values will be before and/or after the outlines
+    outlines = outlines.sel(time=all_times, method="nearest")
+    outlines["time"] = "time", all_times
+    outlines.attrs["bounds"] = bounds
 
     return outlines
 

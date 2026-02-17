@@ -14,6 +14,7 @@ import pandas as pd
 import scipy.interpolate
 import tqdm
 import tqdm.dask
+import tqdm.contrib.concurrent
 import xarray as xr
 import zarr
 from dask.array.core import PerformanceWarning
@@ -755,8 +756,8 @@ def process_chunk(filepath: Path, input_filepaths: dict[Path, threading.Lock], o
 
     data = []
     doys = []
-    for path, lock in input_filepaths.items():
-        with lock:
+    for path, _ in input_filepaths.items():
+        with warnings.catch_warnings():
             with rasterio.open(path) as raster:
                 raster_win = rasterio.windows.from_bounds(
                     *bounds, raster.transform
@@ -841,6 +842,8 @@ def process_chunk(filepath: Path, input_filepaths: dict[Path, threading.Lock], o
     if progress_bar is not None:
         progress_bar.update()
         
+def process_chunk_wrapper(args):
+    return process_chunk(**args)
 
 def create_median_stack(
     years: int | list[int] | None = 2021,
@@ -965,49 +968,10 @@ def create_median_stack(
     chunks_to_process = [chunk for chunk in chunks if not chunk["filepath"].is_file()]
 
     chunks_to_process.sort(key=sort_chunk)
-    # chunks_to_process = []
-    # easting, northing = 549457, 8641637
-    # for chunk in chunks:
-    #     if all(
-    #         [
-    #             chunk["bounds"].left < easting,
-    #             chunk["bounds"].right > easting,
-    #             chunk["bounds"].bottom < northing,
-    #             chunk["bounds"].top > northing
-    #         ]
-    #     ):
-    #         chunks_to_process.append(chunk)
 
-    # print(chunks[:2])
-    # print(n_row_chunks, n_col_chunks, n_zero_pads)
-
-    # return
-
-    # raster_files = list(
-    #     filter(
-    #         lambda fp: int(fp.stem.split("_")[3][:4]) in years,
-    #         raster_dir.rglob(pattern),
-    #     )
-    # )
-
-    # if output_path.is_file():
-    #     return output_path
-
-
-    # strips = get_strips()
     strips = adsvalbard.arcticdem.get_strips("svalbard")
     strips = strips[pd.to_datetime(strips["datetime"]).dt.year.isin(years)]
 
-    # print(strips)
-    # return
-
-    # titles = {
-    #     r_path.stem[: r_path.stem.index("_seg") + 5]: r_path for r_path in raster_files
-    # }
-
-    # locks = {path: threading.Lock() for path in titles.values()}
-
-    # write_lock = threading.Lock()
 
     if len(chunks_to_process) > 0:
         chunks_to_process[-1]["filepath"].parent.mkdir(exist_ok=True, parents=True)
@@ -1027,7 +991,8 @@ def create_median_stack(
                 if filepath not in locks:
                     locks[filepath] = threading.Lock()
 
-                chunk["input_filepaths"][filepath] = locks[filepath]
+                # chunk["input_filepaths"][filepath] = locks[filepath]
+                chunk["input_filepaths"][filepath] = None
                 # chunk["input_filepaths"].append(c
 
                  
@@ -1036,30 +1001,55 @@ def create_median_stack(
         
         # print(overlapping_strips.iloc[0])
         #
+        # 
+    call_args = []
+    for chunk in chunks_to_process:
+        call_args.append({
+            **chunk,
+            "res": res,
+            "crs": crs,
+            "outlier_threshold": outlier_threshold,
+            "v_clip": v_clip,
+            "outlier_proba_dir": temp_dir / "outlier_proba",
+        })
 
-    with tqdm.tqdm(total=len(chunks_to_process)) as progress_bar:
-        funcs = []
-        for chunk in chunks_to_process:
-            funcs.append(
-                functools.partial(
-                    process_chunk,
-                    **chunk,
-                    res=res,
-                    crs=crs,
-                    outlier_threshold=outlier_threshold,
-                    v_clip=v_clip,
-                    outlier_proba_dir=temp_dir / "outlier_proba",
-                    progress_bar=progress_bar,
-                )
-            )
+    if n_threads == 1 or len(call_args) == 1:
+        with tqdm.tqdm(total=len(call_args)) as progress_bar:
+            for args in call_args:
+                process_chunk_wrapper(args)
+                progress_bar.update(1)
+    else:
+        tqdm.contrib.concurrent.process_map(process_chunk_wrapper, call_args, max_workers=n_threads, smoothing=0.1)
+        # with concurrent.futures.ProcessPoolExecutor(max_workers=n_threads) as executor, \
+             # warnings.catch_warnings():
+            # warnings.filterwarnings("ignore", message=".*All-NaN slice.*")
+            # 
+            # for _ in executor.map(process_chunk_wrapper, call_args):
+            #     progress_bar.update(1)
 
-        if n_threads == 1 or len(chunks_to_process) == 1:
-            for func in funcs:
-                func()
-        else:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=n_threads) as executor,warnings.catch_warnings():
-                warnings.filterwarnings("ignore", message=".*All-NaN slice.*")
-                list(executor.map(lambda f: f(), funcs))
+    # with tqdm.tqdm(total=len(chunks_to_process)) as progress_bar:
+    #     funcs = []
+    #     for chunk in chunks_to_process:
+    #         funcs.append(
+    #             functools.partial(
+    #                 process_chunk,
+    #                 **chunk,
+    #                 res=res,
+    #                 crs=crs,
+    #                 outlier_threshold=outlier_threshold,
+    #                 v_clip=v_clip,
+    #                 outlier_proba_dir=temp_dir / "outlier_proba",
+    #                 progress_bar=progress_bar,
+    #             )
+    #         )
+
+    #     if n_threads == 1 or len(chunks_to_process) == 1:
+    #         for func in funcs:
+    #             func()
+    #     else:
+    #         with concurrent.futures.ThreadPoolExecutor(max_workers=n_threads) as executor,warnings.catch_warnings():
+    #             warnings.filterwarnings("ignore", message=".*All-NaN slice.*")
+    #             list(executor.map(lambda f: f(), funcs))
 
 
     kinds = ["median", "nmad", "count", "doy"]
@@ -1077,193 +1067,6 @@ def create_median_stack(
 
         gdal.BuildVRT(str(out_path), chunk_paths)
 
-        
-
-    return
-
-    window_infos = []
-    for col_off in np.arange(0, shape[1], step=block_size[0]):
-        for row_off in np.arange(0, shape[0], step=block_size[1]):
-            width = min(shape[1] - col_off, block_size[0])
-            height = min(shape[0] - row_off, block_size[1])
-
-            window = rio.windows.Window(col_off, row_off, width, height)
-
-            win_bounds = rio.windows.bounds(window, transform=transform)
-
-            overlapping_strips = strips[
-                strips.intersects(shapely.geometry.box(*bounds))
-            ]
-
-            paths = []
-            for title in overlapping_strips["title"].values:
-                if title not in titles:
-                    continue
-                paths.append((titles[title], locks[titles[title]]))
-
-            if len(paths) == 0:
-                continue
-
-            window_infos.append({"window": window, "paths": paths})
-
-    # Shuffle the windows to reduce the chance that multiple threads wait to read the same file
-    random.shuffle(window_infos)
-
-
-    orig_params = dict(
-                driver="GTiff",
-                width=shape[1],
-                height=shape[0],
-                count=1,
-                crs=crs,
-                transform=transform,
-                compress="deflate",
-                BIGTIFF="YES",
-                tiled=True,
-                zlevel=12,
-    )
-    def write_params(dtype: str):
-        params = orig_params.copy()
-
-        params["dtype"] = dtype
-        
-        if dtype == "float32":
-            params.update(
-                {
-                    "nodata": -9999,
-                }
-            )
-        return params
-        
-    # write_params = dict(
-    # )
-    #
-
-    dtypes = {"median": "float32", "count": "uint8", "nmad": "float32"}
-    output_paths = {"median": output_path}
-    output_paths.update({kind: output_path.with_stem(f"{output_path.stem}_{kind}") for kind in dtypes if kind != "median"})
-    temp_paths = {kind: fp.with_name(fp.name + ".tmp") for kind, fp in output_paths.items()}
-    # temp_path = output_path.with_name(output_path.name + ".tmp")
-
-    with contextlib.ExitStack() as stack:
-        if write_in_mem:
-            stacks = {}
-            for kind, dtype in dtypes.items():
-                stack = np.zeros(shape, dtype=dtype)
-                if dtype == "float32":
-                    stack -= 9999
-                stacks[kind] = stack
-            # stack = np.zeros(shape, dtype="float32") - 9999
-        else:
-            out_rasters = {}
-            # out_raster = stack.enter_context(rio.open(temp_path, "w", **write_params))
-            for kind, dtype in dtypes.items():
-                # out_path = temp_path
-                out_rasters[kind] = stack.enter_context(rio.open(temp_paths[kind], "w", **write_params(dtype=dtype))) 
-
-        def process(
-            window_info: list[
-                dict[str, rio.windows.Window | tuple[Path, threading.Lock]]
-            ],
-            progress_bar: tqdm.tqdm | None = None,
-        ) -> None:
-            window: rio.windows.Window = window_info["window"]
-            window_bounds = rio.windows.bounds(window, transform)
-
-            data = []
-
-            for path, lock in window_info["paths"]:
-                with lock:
-                    with rio.open(path) as raster:
-                        raster_win = rio.windows.from_bounds(
-                            *window_bounds, raster.transform
-                        )
-
-                        data.append(
-                            np.clip(
-                                raster.read(
-                                    1, window=raster_win, masked=True, boundless=True
-                                ).filled(np.nan),
-                                -v_clip,
-                                v_clip,
-                            )
-                        )
-
-                    year = path.stem.split("_")[3][:4]
-                    # print(path, year)
-                    # raise NotImplementedError()
-                    outlier_proba_path = temp_dir / f"outlier_proba/{year}/{path.stem}_outlier_proba.tif"
-
-                    with rio.open(outlier_proba_path) as raster:
-
-                        data[-1][raster.read(1, window=raster_win, masked=True, boundless=True).filled(255) > int(outlier_threshold * 255)] = np.nan
-
-            with warnings.catch_warnings():
-                warnings.filterwarnings("ignore", "All-NaN slice")
-                median = np.nanmedian(data, axis=0)
-                count = np.count_nonzero(np.isfinite(data), axis=0)
-                nmad = 1.4826 * np.nanmedian(np.abs(data - median[None, :, :]), axis=0)
-
-            del data
-
-            if np.count_nonzero(np.isfinite(median)) == 0:
-                progress_bar.update()
-                return median
-
-            # median[~np.isfinite(median)] = -9999
-
-            with write_lock:
-                # print(window.row_off, window.row_off + window.height, window.col_off,window.col_off + window.width)
-                if write_in_mem:
-                    for kind, arr in [("median", median), ("count", count), ("nmad", nmad)]:
-                        stacks[kind][
-                            window.row_off : window.row_off + window.height,
-                            window.col_off : window.col_off + window.width,
-                        ] = arr
-                else:
-                    for kind, arr in [("median", median), ("nmad", nmad), ("count", count)]:
-                        if dtypes[kind] == "uint8":
-                            out_rasters[kind].write(arr, 1, window=window)
-                        else:
-                            out_rasters[kind].write(np.where(np.isfinite(arr), arr, -9999), 1, window=window)
-
-            progress_bar.update()
-            return median
-
-        with tqdm.tqdm(
-            total=len(window_infos), desc="Calculating median blocks", smoothing=0.1
-        ) as progress_bar:
-            if n_threads == 1:
-                for window_info in window_infos:
-                    process(window_info=window_info, progress_bar=progress_bar)
-            else:
-                with concurrent.futures.ThreadPoolExecutor(
-                    max_workers=n_threads
-                ) as executor:
-                    with warnings.catch_warnings():
-                        warnings.filterwarnings("ignore", "All-NaN slice")
-                        list(
-                            executor.map(
-                                lambda wi: process(wi, progress_bar=progress_bar),
-                                window_infos,
-                            )
-                        )
-
-    if write_in_mem:
-        for kind, arr in stacks.items():
-            if verbose:
-                print(f"{adsvalbard.utilities.now_time()}: Writing {output_path.name}")
-
-            with rio.open(temp_paths[kind], "w", **write_params(dtypes[kind])) as raster:
-                if kind == "count":
-                    raster.write(arr, 1)
-                else:
-                    raster.write(np.where(np.isfinite(arr), arr, -9999), 1)
-
-    for kind in temp_paths:
-        shutil.move(temp_paths[kind], output_paths[kind])
-
-    return output_path
 
 
 def hypsometric(bin_size: int = 5):

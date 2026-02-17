@@ -231,7 +231,7 @@ def generate_raster_chunks(
         res = CONSTANTS.res
 
     shape = adsvalbard.utilities.shape_from_bounds_res(bounds, [res] * 2)
-    transform = adsvalbard.utilities.get_transform(bounds, (res, res))
+    transform = rasterio.transform.from_origin(bounds.left, bounds.top, res, res)
 
     n_row_chunks = int(np.ceil(shape[0] / chunksize))
     n_col_chunks = int(np.ceil(shape[1] / chunksize))

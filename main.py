@@ -1444,6 +1444,10 @@ def process_all(show_progress_bar: bool = True):
         "SETSM_s2s041_WV03_20150316_10400100085B1D00_1040010009170400_2m_lsf_seg6",
     ]
 
+    # Fix for a very strange bug where urls were jumbled up
+    for col in ["dem", "matchtag"]:
+        strips[col] = strips[col].str.replace(r".*/tps://", "https://", regex=True) 
+
     current_year = strips["start_datetime"].dt.year.max()  # type: ignore
     with tqdm(total=strips.shape[0], disable=(not show_progress_bar)) as progress_bar:
         for _, dem_data in strips.iterrows():
@@ -1469,6 +1473,7 @@ def process_all(show_progress_bar: bool = True):
             start_time = time.time()
             if show_progress_bar:
                 progress_bar.set_description(f"Working on {dem_data['title']}")
+
             dem_path, _ = download_arcticdem(dem_data, verbose=(not show_progress_bar))
             if any(s in str(dem_path) for s in skip_paths):
                 print(f"Skipping {dem_path}")
