@@ -717,7 +717,7 @@ def main():
         #
         #
 
-def process_chunk(filepath: Path, input_filepaths: dict[Path, threading.Lock], outlier_proba_dir: Path, bounds: rasterio.coords.BoundingBox, res: float, crs: object, outlier_threshold: float, v_clip: float, progress_bar: tqdm.tqdm | None = None):
+def process_chunk(filepath: Path, input_filepaths: dict[Path, threading.Lock], outlier_proba_dir: Path, bounds: rasterio.coords.BoundingBox, res: float, crs: object, outlier_threshold: float, v_clip: float, progress_bar: tqdm.tqdm | None = None, vertical_shifts: dict[str, float] | None = None):
     shape = adsvalbard.utilities.shape_from_bounds_res(bounds=bounds, res=[res] * 2)
     transform = rasterio.transform.from_origin(bounds.left, bounds.top, res, res)
 
@@ -758,6 +758,10 @@ def process_chunk(filepath: Path, input_filepaths: dict[Path, threading.Lock], o
     doys = []
     for path, _ in input_filepaths.items():
         with warnings.catch_warnings():
+            if path.name.endswith("epsg32633_5.0m.vrt") and not path.with_stem(path.stem.replace("_dem_", "_matchtag_")).is_file():
+                print(f"Matchtag missing for {path.stem} in chunk {'/'.join(output_paths['median'].parts[-2:])}")
+                continue
+            
             with rasterio.open(path) as raster:
                 raster_win = rasterio.windows.from_bounds(
                     *bounds, raster.transform
@@ -776,6 +780,9 @@ def process_chunk(filepath: Path, input_filepaths: dict[Path, threading.Lock], o
             if path.name.endswith("epsg32633_5.0m.vrt"):
                 with rasterio.open(path.with_stem(path.stem.replace("_dem_", "_matchtag_"))) as raster2:
                     data[-1][raster2.read(1, window=raster_win, masked=True, boundless=True).filled(0) == 0] = np.nan 
+
+            if vertical_shifts is not None:
+                data[-1] += vertical_shifts[path.stem.split("_dem_")[0]]
 
             date_str = path.stem.split("_")[3]
             year = date_str[:4]
@@ -848,11 +855,13 @@ def process_chunk_wrapper(args):
 def create_median_stack(
     years: int | list[int] | None = 2021,
     n_threads: int | None = None,
-    region: str = "recherchefront",
+    region: str = "svalbard",
     raster_type: str = "dem",
-    outlier_threshold: float = 0.95,
+    outlier_threshold: float | None = 0.95,
     verbose: bool = True,
     write_in_mem: bool = False,
+    bounds_override: rasterio.coords.BoundingBox | None = None,
+    vertcoreg_label: str | None = None,
 ):
     import rasterio as rio
     import rasterio.transform
@@ -871,7 +880,7 @@ def create_median_stack(
         raster_dir = temp_dir.joinpath("dhdt")
     elif raster_type == "dem":
         raster_dir = temp_dir.joinpath("arcticdem_coreg")
-    elif raster_type == "dem_noncoreg":
+    elif raster_type in ["dem_noncoreg", "dem_vertcoreg"]:
         raster_dir = temp_dir / "arcticdem_vrts"
 
     else:
@@ -895,6 +904,8 @@ def create_median_stack(
 
     filt_str = f"filt_{str(int(outlier_threshold * 100)).zfill(3)}"
 
+    vertical_shifts = None
+
     if raster_type == "dhdt":
         output_path = raster_dir / f"medians/{region}/dhdt/median_{filt_str}_dhdt{ext}.vrt"
         v_clip = 250 / (2021 - 2009)
@@ -913,9 +924,28 @@ def create_median_stack(
         pattern = "*_dem_epsg32633_5.0m.vrt"
         outlier_threshold = None
         dirs = [raster_dir]
+    elif raster_type == "dem_vertcoreg":
+        output_path = temp_dir / f"medians/{region}/dem_vertcoreg/median_dem{ext}.vrt"
+        v_clip = 1500
+        pattern = "*_dem_epsg32633_5.0m.vrt"
+        outlier_threshold = None
+        dirs = [raster_dir]
+
+        if len(years) > 1:
+            raise NotImplementedError("Vertical coreg not implemented for multiple years")
+
+        if vertcoreg_label is not None:
+            vertcoreg_label = f"_{vertcoreg_label}"
+        else:
+            vertcoreg_label = ""
+        vertical_shifts = pd.read_csv(temp_dir / f"vertcoreg_results/vertcoreg_results_{years[0]}{vertcoreg_label}.csv", index_col=0).squeeze()
+        
 
     else:
         raise NotImplementedError(f"Unknown raster type: {raster_type}")
+
+
+
 
     res = CONSTANTS.res
     bounds_dict = CONSTANTS.regions[region]
@@ -933,6 +963,11 @@ def create_median_stack(
 
     chunks = []
     for i, chunk_bounds in enumerate(adsvalbard.rasters.generate_raster_chunks(bounds=bounds, res=res, chunksize=block_size[0])):
+
+        if bounds_override is not None:
+            if not adsvalbard.utilities.bounds_intersect(bounds_override, chunk_bounds):
+                continue
+
         col = i % n_col_chunks
         row = int((i - col) / n_col_chunks) 
 
@@ -947,8 +982,9 @@ def create_median_stack(
         )
 
 
-    centerpoint = 549457, 8641637
-    centerpoint = 654172, 8883410
+    centerpoint = 549457, 8641637 # Kjellstromdalen
+    centerpoint = 654172, 8883410 # Austfonna NW margin
+    centerpoint = 673467, 8866343 # Austfonna camp
     def sort_chunk(chunk):
 
         easting = np.mean([chunk["bounds"].right, chunk["bounds"].left])
@@ -1011,6 +1047,7 @@ def create_median_stack(
             "outlier_threshold": outlier_threshold,
             "v_clip": v_clip,
             "outlier_proba_dir": temp_dir / "outlier_proba",
+            "vertical_shifts": vertical_shifts.copy() if vertical_shifts is not None else None,
         })
 
     if n_threads == 1 or len(call_args) == 1:
