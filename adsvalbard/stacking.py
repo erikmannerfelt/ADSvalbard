@@ -717,7 +717,7 @@ def main():
         #
         #
 
-def process_chunk(filepath: Path, input_filepaths: dict[Path, threading.Lock], outlier_proba_dir: Path, bounds: rasterio.coords.BoundingBox, res: float, crs: object, outlier_threshold: float, v_clip: float, progress_bar: tqdm.tqdm | None = None, vertical_shifts: dict[str, float] | None = None):
+def process_chunk(filepath: Path, input_filepaths: dict[Path, threading.Lock], outlier_proba_dir: Path, bounds: rasterio.coords.BoundingBox, res: float, crs: object, outlier_threshold: float, v_clip: float, progress_bar: tqdm.tqdm | None = None, vertical_shifts: pd.DataFrame | None = None):
     shape = adsvalbard.utilities.shape_from_bounds_res(bounds=bounds, res=[res] * 2)
     transform = rasterio.transform.from_origin(bounds.left, bounds.top, res, res)
 
@@ -756,11 +756,17 @@ def process_chunk(filepath: Path, input_filepaths: dict[Path, threading.Lock], o
 
     data = []
     doys = []
+
+    X = None
+    Y = None
     for path, _ in input_filepaths.items():
         with warnings.catch_warnings():
             if path.name.endswith("epsg32633_5.0m.vrt") and not path.with_stem(path.stem.replace("_dem_", "_matchtag_")).is_file():
                 print(f"Matchtag missing for {path.stem} in chunk {'/'.join(output_paths['median'].parts[-2:])}")
                 continue
+            if vertical_shifts is not None:
+                if path.stem.split("_dem_")[0] not in vertical_shifts.index:
+                    continue
             
             with rasterio.open(path) as raster:
                 raster_win = rasterio.windows.from_bounds(
@@ -777,12 +783,27 @@ def process_chunk(filepath: Path, input_filepaths: dict[Path, threading.Lock], o
                     )
                 )
 
+                win_transform = rasterio.windows.transform(raster_win, raster.transform)
+
+                if X is None:
+                    # Build column and row indices
+                    height, width = data[-1].shape
+                    cols = np.arange(width)
+                    rows = np.arange(height)
+                    xs = win_transform.c + cols * win_transform.a + win_transform.b * rows[0]  # but b is usually 0
+                    ys = win_transform.f + rows * win_transform.e                          # e is usually negative
+
+                    # Create 2D grids
+                    X, Y = np.meshgrid(xs, ys)
+
             if path.name.endswith("epsg32633_5.0m.vrt"):
                 with rasterio.open(path.with_stem(path.stem.replace("_dem_", "_matchtag_"))) as raster2:
                     data[-1][raster2.read(1, window=raster_win, masked=True, boundless=True).filled(0) == 0] = np.nan 
 
             if vertical_shifts is not None:
-                data[-1] += vertical_shifts[path.stem.split("_dem_")[0]]
+                a, b, c, center_x, center_y = vertical_shifts.loc[path.stem.split("_dem_")[0], ["a", "b", "c", "center_x", "center_y"]].values
+                corr = a * (X - center_x) + b * (Y - center_y) + c
+                data[-1] += corr
 
             date_str = path.stem.split("_")[3]
             year = date_str[:4]
@@ -862,6 +883,7 @@ def create_median_stack(
     write_in_mem: bool = False,
     bounds_override: rasterio.coords.BoundingBox | None = None,
     vertcoreg_label: str | None = None,
+    nchunks_override: int | None = None,
 ):
     import rasterio as rio
     import rasterio.transform
@@ -939,6 +961,7 @@ def create_median_stack(
         else:
             vertcoreg_label = ""
         vertical_shifts = pd.read_csv(temp_dir / f"vertcoreg_results/vertcoreg_results_{years[0]}{vertcoreg_label}.csv", index_col=0).squeeze()
+        vertical_shifts = vertical_shifts[vertical_shifts["n_comparisons"] > 30]
         
 
     else:
@@ -984,7 +1007,10 @@ def create_median_stack(
 
     centerpoint = 549457, 8641637 # Kjellstromdalen
     centerpoint = 654172, 8883410 # Austfonna NW margin
-    centerpoint = 673467, 8866343 # Austfonna camp
+    centerpoint = 673467, 8881915 # Austfonna camp
+    # centerpoint = 673467, 8866343 # Austfonna ETN-6
+    # centerpoint = 709147, 8872572 # East Austfonna
+    # centerpoint = 723077, 8872572 # East-east Austfonna
     def sort_chunk(chunk):
 
         easting = np.mean([chunk["bounds"].right, chunk["bounds"].left])
@@ -998,25 +1024,40 @@ def create_median_stack(
     #     northing = np.mean([chunk["bounds"].top, chunk["bounds"].bottom])
 
     #     return ((easting - 673248) ** 2 + (northing - 8901729) ** 2) ** 2
-    # chunks.sort(key=sort_chunk)
-    # chunks = chunks[:1]
+    if nchunks_override is not None:
+        chunks.sort(key=sort_chunk)
+        chunks = chunks[:nchunks_override]
 
     chunks_to_process = [chunk for chunk in chunks if not chunk["filepath"].is_file()]
+    chunks_to_process = []
+    for chunk in sorted(chunks, key=sort_chunk):
+        if chunk["filepath"].is_file():
+            # If a tmp file is left, redo it. If there is none, then it's good
+            if len(list(chunk["filepath"].parent.glob(f"{chunk['filepath'].stem}*.tmp"))) == 0:
+                continue
 
-    chunks_to_process.sort(key=sort_chunk)
+        chunks_to_process.append(chunk)
+    # chunks_to_process.sort(key=sort_chunk)
 
     strips = adsvalbard.arcticdem.get_strips("svalbard")
     strips = strips[pd.to_datetime(strips["datetime"]).dt.year.isin(years)]
 
+    bad_titles = Path("temp.svalbard/bad_dems.txt").read_text().splitlines()
+    strips = strips[~strips["title"].isin(bad_titles)]
 
     if len(chunks_to_process) > 0:
         chunks_to_process[-1]["filepath"].parent.mkdir(exist_ok=True, parents=True)
+
+
 
     locks = {}
     for chunk in chunks_to_process:
         overlapping_strips: gpd.GeoDataFrame = strips[strips.intersects(shapely.geometry.box(*chunk["bounds"]))]
 
         for _, strip in overlapping_strips.iterrows():
+            if strip["title"] in bad_titles:
+                print(f"Skipping {strip['title']}")
+                continue
             for raster_dir in dirs:
                 filepath = raster_dir / f"{strip.title}{pattern.replace('*', '')}"
 
@@ -1055,8 +1096,9 @@ def create_median_stack(
             for args in call_args:
                 process_chunk_wrapper(args)
                 progress_bar.update(1)
-    else:
+    elif len(call_args) > 0:
         tqdm.contrib.concurrent.process_map(process_chunk_wrapper, call_args, max_workers=n_threads, smoothing=0.1)
+
         # with concurrent.futures.ProcessPoolExecutor(max_workers=n_threads) as executor, \
              # warnings.catch_warnings():
             # warnings.filterwarnings("ignore", message=".*All-NaN slice.*")
@@ -1103,6 +1145,8 @@ def create_median_stack(
             chunk_paths.append(str(chunk_path))
 
         gdal.BuildVRT(str(out_path), chunk_paths)
+
+    return [chunk["filepath"] for chunk in chunks]
 
 
 

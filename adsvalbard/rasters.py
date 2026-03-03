@@ -2,6 +2,7 @@ import itertools
 import pickle
 from pathlib import Path
 from typing import Sequence
+import warnings
 
 import geopandas as gpd
 import matplotlib.pyplot as plt
@@ -347,7 +348,7 @@ def build_npi_mosaic(
 
 
 def build_stable_terrain_mask(
-    roi_path: Path = Path("shapes/region_of_interest.geojson"), verbose: bool = True
+    roi_path: Path = Path("shapes/region_of_interest.geojson"), verbose: bool = True, redo: bool = False
 ) -> Path:
     """
     Build a stable terrain mask for the region of interest.
@@ -357,6 +358,7 @@ def build_stable_terrain_mask(
     - 1936 glacier outlines from Geyman et al., 2022
     - Water (rivers/lakes) according to the NPI S100 map
     - Moraines according to the NPI S100 map
+    - Glaciers according to the NPI S100 map
 
     ... and includes all other areas on land according to the NPI S100 map
 
@@ -366,13 +368,15 @@ def build_stable_terrain_mask(
         The path to the region of interest shape. The total bounds are used to derive the bounds of the mask.
     verbose:
         Whether to print updates to the console
+    redo
+        Overwrite an already existing file if it exists.
 
     Returns
     -------
     A path to the stable terrain mask.
     """
     out_filepath = CONSTANTS.temp_dir / "stable_terrain.tif"
-    if out_filepath.is_file():
+    if out_filepath.is_file() and not redo:
         return out_filepath
 
     if verbose:
@@ -391,6 +395,7 @@ def build_stable_terrain_mask(
     shape = adsvalbard.utilities.shape_from_bounds_res(
         total_bounds, [CONSTANTS.res] * 2
     )
+    warnings.filterwarnings("error")
 
     outline_paths = adsvalbard.inputs.download_category("outlines")
 
@@ -404,24 +409,40 @@ def build_stable_terrain_mask(
         .dissolve()
         .to_crs(crs)
     )
-    water = (
-        gpd.read_file(f"zip://{s100_path}!NP_S100_SHP/S100_Vann_f.shp")
-        .dissolve()
-        .to_crs(crs)
-    )
-    moraines = (
-        gpd.read_file(f"zip://{s100_path}!NP_S100_SHP/S100_Morener_f.shp")
-        .dissolve()
-        .to_crs(crs)
-    )
-    land = (
-        gpd.read_file(f"zip://{s100_path}!NP_S100_SHP/S100_Land_f.shp")
-        .dissolve()
-        .to_crs(crs)
-    )
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore")
+        glaciers = (
+            gpd.read_file(f"zip://{s100_path}!NP_S100_SHP/S100_Isbreer_f.shp")
+            .simplify(5)
+            .to_frame()
+            .dissolve()
+            .to_crs(crs)
+        ).union(geyman_1936)
+        del geyman_1936
+        water = (
+            gpd.read_file(f"zip://{s100_path}!NP_S100_SHP/S100_Vann_f.shp")
+            .simplify(5)
+            .to_frame()
+            .dissolve()
+            .to_crs(crs)
+        )
+        moraines = (
+            gpd.read_file(f"zip://{s100_path}!NP_S100_SHP/S100_Morener_f.shp")
+            .simplify(5)
+            .to_frame()
+            .dissolve()
+            .to_crs(crs)
+        )
+        land = (
+            gpd.read_file(f"zip://{s100_path}!NP_S100_SHP/S100_Land_f.shp")
+            .simplify(5)
+            .to_frame()
+            .dissolve()
+            .to_crs(crs)
+        )
 
-    stable = land.difference(geyman_1936.union(water).union(moraines))
-    del geyman_1936
+    stable = land.difference(glaciers.union(water).union(moraines))
+    del glaciers
     del water
     del moraines
     del land
@@ -452,3 +473,9 @@ def build_stable_terrain_mask(
         print(f"{now_time()}: Saved {out_filepath.name}.")
 
     return out_filepath
+
+def sample_raster(filepath: Path, geometry: gpd.GeoSeries, nodata: float | int = np.nan) -> np.ndarray:
+    with rio.open(filepath) as raster:
+        arr = np.fromiter(map(lambda v: v[0], raster.sample(np.column_stack((geometry.x, geometry.y)))), count=geometry.shape[0], dtype=raster.dtypes[0])
+        # print(filepath.name, raster.scales)
+        return np.where(arr == raster.nodata, nodata, arr* raster.scales[0] + raster.offsets[0])

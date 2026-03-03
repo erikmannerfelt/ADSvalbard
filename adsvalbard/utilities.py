@@ -435,3 +435,18 @@ def resampling_rio_to_gdal(resampling: rasterio.warp.Resampling) -> str:
 def now_time() -> str:
     """Return a string showing the current time."""
     return datetime.datetime.now().strftime("%H:%M:%S")
+
+
+def create_random_points(bounds: rasterio.coords.BoundingBox, n_points: int,  crs: str | int | None = None, random_state: int = 0) -> gpd.GeoDataFrame:
+    
+    rng: np.random.Generator = np.random.default_rng(random_state)
+
+    if crs is None:
+        crs = CONSTANTS.crs_epsg
+
+    x_pts = rng.uniform(bounds.left, bounds.right, size=n_points)
+    y_pts = rng.uniform(bounds.bottom, bounds.top, size=n_points)
+
+    points = gpd.points_from_xy(x_pts, y_pts, crs=crs)
+
+    return gpd.GeoDataFrame(geometry=points[:n_points])

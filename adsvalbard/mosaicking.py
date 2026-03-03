@@ -5,6 +5,8 @@ import numpy as np
 from rasterio.features import rasterize
 from rasterio.transform import Affine, array_bounds
 from scipy.ndimage import distance_transform_edt
+import tqdm.contrib.concurrent
+import shutil
 
 import scipy.interpolate
 
@@ -17,7 +19,7 @@ def sample_raster(filepath: Path, geometry: gpd.GeoSeries, nodata: float | int =
         return np.where(arr == raster.nodata, nodata, arr)
     
 
-def sample_points_for_bias(year: int, n_points: int = 80000, point_density_threshold: float | None = None, verbose: bool = True):
+def sample_points_for_bias(year: int, n_points: int = 80000, point_density_threshold: float | None = None, verbose: bool = True, redo: bool= False):
 
     if point_density_threshold is None:
         # This year had particularly annoying outliers that require this threshold instead
@@ -29,7 +31,7 @@ def sample_points_for_bias(year: int, n_points: int = 80000, point_density_thres
             point_density_threshold = 0.1
     cache_filepath = Path(f"temp.svalbard/sampled_points/sampled_points_for_bias_{year}.arrow")
 
-    if cache_filepath.is_file():
+    if cache_filepath.is_file() and not redo:
         return gpd.read_feather(cache_filepath)
     if verbose:
         print("Reading land outlines")
@@ -154,10 +156,6 @@ def sample_points_for_bias(year: int, n_points: int = 80000, point_density_thres
 
 def get_uncorr_bias(year: int):
 
-    if year <= 2019:
-        print(f"WARNING: TEMPORARILY USING 2024 INSTEAD OF {year}")
-        year = 2024
-
     grid = sample_points_for_bias(year=year)
     model = scipy.interpolate.RBFInterpolator(grid[["x", "y"]], grid["diff"], kernel="linear")
 
@@ -258,10 +256,11 @@ def fit_trend_corr_nmad_1d(data, eps=1e-12) -> dict[str, np.ndarray]:
 
 
 def fit_trend(dems, flags, verbose: bool = True) -> dict[str, np.ndarray]:
-    dems[((flags <= 2).sum(axis=-1)[..., None] >= 2) & (flags == 3)] = np.nan
+    # If there are at least three good DEM points, remove all the quality=3 points
+    dems[((np.isin(flags, [1, 2, 4])).sum(axis=-1)[..., None] >= 3) & (flags == 3)] = np.nan
     fit = fit_trend_corr_nmad_1d(dems)
 
-    for threshold in [1.5, 4]:
+    for threshold in [1.5]:#, 4]:
         if verbose:
             print(f"Improving with threshold ", threshold)
         for i in range(dems.shape[-1]):
@@ -302,41 +301,49 @@ def get_dem_chunk_path(kind: str, chunk_nr: str, chunksize: int, year: int) -> P
 
     if kind == "uncorr":
         return stack_dir / f"dem_noncoreg/median_dem_{year}_chunks_{chunksize}/chunk_{chunk_nr}.tif"
+    if kind == "vertcoreg":
+        return stack_dir / f"dem_vertcoreg/median_dem_{year}_chunks_{chunksize}/chunk_{chunk_nr}.tif"
+        
 
     return stack_dir / f"dem/median_filt_{kind}_dem_{year}_chunks_{chunksize}/chunk_{chunk_nr}.tif"
 
-def load_and_mosaic_dem(chunk_nr: str, chunksize: int, year: int, return_uncorr: bool = False, min_uncorr_count: int = 3):
-    stack_dir = Path("temp.svalbard/medians/svalbard/")
+def load_and_mosaic_dem(chunk_nr: str, chunksize: int, year: int, return_uncorr: bool = False, min_uncorr_count: int = 3, min_vertcorr_count: int = 2):
     nmad_thresholds = {
         "p75": 10.,
         "p95": 30.,
         "uncorr": 30.,
+        "vertcoreg": 10.,
     }
-    paths = {kind: get_dem_chunk_path(kind, chunk_nr=chunk_nr, chunksize=chunksize, year=year) for kind in ["p95", "p75", "uncorr"]}
-    # paths = {
-    #     "p95": ,
-    #     "uncorr": stack_dir / f"dem_noncoreg/median_dem_{year}_chunks_{chunksize}/chunk_{chunk_nr}.tif",
-    # }
-    # paths["p75"] = paths["p95"].parent.with_stem(paths["p95"].parent.stem.replace("095", "075")) / paths["p95"].name
+    paths = {kind: get_dem_chunk_path(kind, chunk_nr=chunk_nr, chunksize=chunksize, year=year) for kind in ["p95", "p75", "uncorr", "vertcoreg"]}
     for key in list(paths.keys()):
         paths[f"{key}_nmad"] = paths[key].with_stem(paths[key].stem + "_nmad")
 
-    with rio.open(paths["p95"]) as raster:
-        # params["transform"] = raster.transform
-        # params["crs"] = raster.crs
+    with rio.open(paths["p75"]) as raster:
         meta = raster.meta
         quality_flag = np.ones((raster.height, raster.width), dtype="uint8")
-        # print(raster.dtypes[0])
         dem = np.full(quality_flag.shape, np.nan, dtype=raster.dtypes[0])
         nmad = dem.copy()
-        count = quality_flag.copy()
+        count = quality_flag.copy() - 1
         doy = quality_flag.copy().astype("uint16")
         xy_coords = np.dstack(np.meshgrid(np.linspace(raster.bounds.left, raster.bounds.right, raster.width), np.linspace(raster.bounds.bottom, raster.bounds.top, raster.height)[::-1])).reshape((-1, 2))
+
+    ocean = read_coastline(year=year, meta=meta)
 
     uncorr_dem = {}
 
     prev_mask = np.zeros(dem.shape, dtype=bool)
-    for i, key in enumerate(["p75", "p95", "uncorr"], start=1):
+    vertcoreg_exists = False
+    for i, key in [(4, "vertcoreg"), (1, "p75"), (2, "p95"), (3, "uncorr")]:
+        if key == "vertcoreg":
+            if not paths[key].is_file():
+                continue
+            vertcoreg_exists = True
+        else:
+            # If there is a vertcoreg tile, only use vertcoreg and uncorr
+            if key != "uncorr" and vertcoreg_exists:
+                continue
+        if key == "p95" and not paths[key].is_file():
+            continue
         with rio.open(paths[key].with_stem(paths[key].stem + "_nmad")) as raster:
             new_nmad = raster.read(1, masked=True).filled(np.nan)   
 
@@ -344,13 +351,13 @@ def load_and_mosaic_dem(chunk_nr: str, chunksize: int, year: int, return_uncorr:
 
         with rio.open(paths[key].with_stem(paths[key].stem + "_count")) as raster:
             arr = raster.read(1, masked=True).filled(0)
-            if key == "uncorr":
-                mask = mask & (count >= min_uncorr_count)
-                count[count < min_uncorr_count] = 0
+            if key in ["uncorr", "vertcorr"]:
+                good_count = arr >= (min_uncorr_count if key == "uncorr" else min_vertcorr_count)
+                mask = mask & good_count
+                arr[~good_count] = 0
             count[mask] = arr[mask]
             if return_uncorr:
                 uncorr_dem["count"] = arr
-
 
         with rio.open(paths[key].with_stem(paths[key].stem + "_doy")) as raster:
             arr = raster.read(1, masked=True).filled(0)
@@ -378,6 +385,10 @@ def load_and_mosaic_dem(chunk_nr: str, chunksize: int, year: int, return_uncorr:
             uncorr_dem["nmad"] = new_nmad
         prev_mask = prev_mask | mask
 
+        # If there's a vertcoreg tile, use ONLY that
+        # if key == "vertcoreg":
+        #     break
+
         # if np.count_nonzero(~prev_mask) == 0:
         #     break
 
@@ -389,12 +400,16 @@ def load_and_mosaic_dem(chunk_nr: str, chunksize: int, year: int, return_uncorr:
         "count": count,
         "nmad": nmad,
         "doy": doy,
+        "ocean": ocean,
         "meta": meta,
         "uncorr": uncorr_dem,
     }
 
-def write_formatted(key, fp, arr, params):
+def write_formatted(key, fp, arr, params, verbose: bool = True, redo: bool = False):
     shape = params["height"], params["width"]
+
+    if fp.is_file() and not redo:
+        return
 
     fp.parent.mkdir(exist_ok=True, parents=True)
     scale = 1
@@ -403,6 +418,10 @@ def write_formatted(key, fp, arr, params):
 
     if arr.dtype in ["uint8", "uint16"]:
         nodata = 0
+
+    if arr.dtype == "bool":
+        nodata = 255
+        arr = arr.astype("uint8")
 
     if key == "dem" or "nmad" in key or key.startswith("intercept_") or key.startswith("se_"):
         umax = 65534
@@ -434,7 +453,7 @@ def write_formatted(key, fp, arr, params):
         nodata = info.min
         umin = info.min + 1
         umax = info.max - 1
-        vmax = 300
+        vmax = 20 if key == "accel" else 50
 
         arr = np.where(
             np.isfinite(arr),
@@ -451,6 +470,7 @@ def write_formatted(key, fp, arr, params):
         "width": shape[1],
         "count": 1,
         "tiled": True,
+        "driver": "GTiff",
         "compress": "deflate",
         "zlevel": 9,
         "dtype": str(arr.dtype),
@@ -469,11 +489,14 @@ def write_formatted(key, fp, arr, params):
 
 
     # print(key, meta)
-    print(f"Writing {fp}")
-    with rio.open(fp, "w", **meta) as raster:
+    if verbose:
+        print(f"Writing {fp}")
+    tmp_fp = fp.with_suffix(".tmp")
+    with rio.open(tmp_fp, "w", **meta) as raster:
         raster.write(arr.reshape(shape), 1)
         raster.scales = (scale,)
         raster.offsets = (offset,)
+    shutil.move(tmp_fp, fp)
 
 
 
@@ -617,17 +640,14 @@ def blend_bands(
     return dem_out, count_out, nmad_out, doy_out
 
 
-
-def mosaic_tile(chunk_nr: str = "005_017", chunksize: int = 512 * 7):
-
-    out_dir = Path(f"temp.svalbard/filt/svalbard/chunks_{chunksize}/chunk_{chunk_nr}")
+def get_mosaic_filenames(chunk_nr: str, chunksize: int = 512 * 7) -> dict[str, Path]:
     years = list(range(2013, 2025))
-
+    out_dir = Path(f"temp.svalbard/filt/svalbard/chunks_{chunksize}/chunk_{chunk_nr}")
     out_paths = {}
     for year in years:
         fp = out_dir / f"chunk_{chunk_nr}_{year}.tif"
         out_paths[f"{year}_dem"] = fp
-        for key in ["quality", "doy", "count", "nmad"]:
+        for key in ["quality", "doy", "count", "nmad", "ocean"]:
             out_paths[f"{year}_{key}"] = fp.with_stem(fp.stem + f"_{key}")
 
     for trend, name in [("0", f"{years[0]}-{years[5]}"), ("1", f"{years[6]}-{years[-1]}"), ("full", f"{years[0]}-{years[-1]}")]:
@@ -639,6 +659,56 @@ def mosaic_tile(chunk_nr: str = "005_017", chunksize: int = 512 * 7):
             out_paths["accel"] = fp.with_stem(fp.stem + "_accel")
             out_paths["se_accel"] = fp.with_stem(fp.stem + "_accel_se")
 
+    return out_paths
+
+def read_coastline(year: str, meta: dict[str, object]) -> np.ndarray:
+    import rasterio.features
+    import shapely.geometry
+
+    # import time
+
+    # start_time = time.time()
+    filepath = Path(f"data/coastlines/Coast{year}.zip")
+
+    bounds = shapely.geometry.box(*rio.transform.array_bounds(meta["height"], meta["width"], meta["transform"]))
+    coast = gpd.read_file(filepath, bbox=bounds).to_crs(meta["crs"])
+
+    try:
+        arr = rasterio.features.rasterize(coast.geometry, out_shape=(meta["height"], meta["width"]), transform=meta["transform"])
+    except ValueError as e:
+        if not "No valid geometry" in str(e):
+            raise
+        return np.zeros((meta["height"], meta["width"])) == 0
+
+    # print(f"Took {time.time() - start_time:.1f}s")
+
+    return arr == 0
+
+def mosaic_tile(chunk_nr: str = "007_004", chunksize: int = 512 * 7, verbose: bool = True, redo: bool = False):
+
+    years = list(range(2013, 2025))
+    out_paths = get_mosaic_filenames(chunk_nr=chunk_nr, chunksize=chunksize)
+
+    if all(fp.is_file() for fp in out_paths.values()) and not redo:
+        return out_paths
+    # out_dir = Path(f"temp.svalbard/filt/svalbard/chunks_{chunksize}/chunk_{chunk_nr}")
+
+    # out_paths = {}
+    # for year in years:
+    #     fp = out_dir / f"chunk_{chunk_nr}_{year}.tif"
+    #     out_paths[f"{year}_dem"] = fp
+    #     for key in ["quality", "doy", "count", "nmad"]:
+    #         out_paths[f"{year}_{key}"] = fp.with_stem(fp.stem + f"_{key}")
+
+    # for trend, name in [("0", f"{years[0]}-{years[5]}"), ("1", f"{years[6]}-{years[-1]}"), ("full", f"{years[0]}-{years[-1]}")]:
+    #     fp = out_dir / f"chunk_{chunk_nr}_trend_{name}.tif"
+    #     for part in ["r", "intercept", "nmad", "slope", "se"]:
+    #         out_paths[f"{part}_{trend}"] = fp.with_stem(fp.stem + f"_{part}")
+
+    #     if trend == "full":
+    #         out_paths["accel"] = fp.with_stem(fp.stem + "_accel")
+    #         out_paths["se_accel"] = fp.with_stem(fp.stem + "_accel_se")
+
     # Open a raster of the chunk (could be any) to get its metadata
     with rio.open(get_dem_chunk_path("p75", chunk_nr=chunk_nr, chunksize=chunksize, year=2024)) as raster:
         params = raster.meta
@@ -646,11 +716,18 @@ def mosaic_tile(chunk_nr: str = "005_017", chunksize: int = 512 * 7):
     bad_regions = gpd.read_file("shapes/bad_coreg_regions.geojson")
     dems = []
     flags = []
+    oceans = []
     weights = compute_weight_field(meta=params, bad_regions=bad_regions)
+
     for year in years:
-        print(year)
+        if verbose:
+            print(year)
 
         out = load_and_mosaic_dem(chunk_nr=chunk_nr, chunksize=chunksize, year=year, return_uncorr=weights is not None)
+
+        if np.any(out["quality"] == 4) and weights is not None:
+            print("PRELININARY DISABLING WEIGHTS")
+            weights = None
 
         if weights is not None:
             out["dem"], out["count"], out["nmad"], out["doy"] = blend_bands(
@@ -667,31 +744,52 @@ def mosaic_tile(chunk_nr: str = "005_017", chunksize: int = 512 * 7):
             out["quality"][weights > 0] = 3
 
         dems.append(out["dem"].ravel()[:, None])
-
         flags.append(out["quality"].ravel()[:, None])
+        oceans.append(out["ocean"].ravel()[:, None])
 
-        for key in ["nmad", "count", "doy", "dem", "quality"]:
+        for key in ["nmad", "count", "doy", "dem", "quality", "ocean"]:
             write_formatted(
                 key,
                 out_paths[f"{year}_{key}"],
                 out[key],
                 params=params,
+                verbose=verbose,
+                redo=redo,
             )
-            if key not in ["dem", "quality"]:
-                del out[key]
-        
-    shape = params["height"], params["width"]
+            del out[key]
+            # if key not in ["dem", "quality"]:
+            #     del out[key]
     dems = np.hstack(dems)
     flags = np.hstack(flags)
+    oceans = np.hstack(oceans)
 
+    # These points are ocean in every DEM. Should be skipped
+    only_ocean = np.count_nonzero(~oceans, axis=1) < 2
+    # only_ocean = oceans.all(axis=-1)
+
+    # Retain points that aren't only in the ocean
+    dems = dems[~only_ocean]
+
+    # Apply the yearly ocean mask
+    dems[oceans[~only_ocean]] = 0.
+    flags = flags[~only_ocean]
+
+    # enough_pts = np.count_nonzero(np.isfinite(dems), axis=-1) >= 2
+    # dems = dems[enough_pts]
+    # flags = flags[enough_pts]
+
+    del oceans
+    
     data = {}
 
-    print("Fitting trend")
+    if verbose:
+        print("Fitting trend")
     for (key, data_slice) in [("0", slice(0, 6)), ("1", slice(6, None)), ("full", None)]:
 
         fit = fit_trend(
             dems[:, data_slice].copy() if data_slice is not None else dems,
             flags[:, data_slice].copy() if data_slice is not None else flags,
+            verbose=verbose,
         )
 
         for key2 in fit:
@@ -700,7 +798,6 @@ def mosaic_tile(chunk_nr: str = "005_017", chunksize: int = 512 * 7):
 
         data[f"se_{key}"] = np.full_like(data[f"slope_{key}"], np.nan, dtype=data[f"slope_{key}"].dtype)
 
-        print(np.nanmean(data[f"var_t_{key}"]))
         valid = np.isfinite(data[f"nmad_{key}"]) & np.isfinite(data[f"var_t_{key}"]) & (data[f"var_t_{key}"] > 1e-12)
 
         data[f"se_{key}"][valid] = data[f"nmad_{key}"][valid] / np.sqrt(data[f"var_t_{key}"][valid])
@@ -722,14 +819,33 @@ def mosaic_tile(chunk_nr: str = "005_017", chunksize: int = 512 * 7):
     data["accel"] = (data["slope_1"] - data["slope_0"]) / 6
     data["se_accel"] = np.sqrt(data["se_0"] ** 2 + data["se_1"] ** 2) / 6
 
+    # mask_valid = np.zeros_like(only_ocean, dtype=bool)
+    # mask_valid[~only_ocean] = enough_pts          # where we have enough points
+
+    # mask_no_enough = np.zeros_like(only_ocean, dtype=bool)
+    # mask_no_enough[~only_ocean] = ~enough_pts     # where we don't
     
     for key, arr in data.items():
         if key not in out_paths:
             continue
+
+        arr2 = np.zeros((only_ocean.shape[0],), dtype=arr.dtype)
+
+        arr2[~only_ocean] = arr
+
+        # arr2[~only_ocean] = np.where(
+        #     enough_pts,
+        #     arr,
+        #     np.nan if "float" in str(arr.dtype) else 0,
+        # )
+
+        # arr2[~only_ocean][enough_pts] = arr
+        # arr2[~only_ocean][~enough_pts] = np.nan if "float" in str(arr.dtype) else 0
+        # arr2[~only_ocean] = arr
         fp = out_paths[key]
-        write_formatted(key=key, fp=fp, arr=arr, params=params)
+        write_formatted(key=key, fp=fp, arr=arr2, params=params, verbose=verbose, redo=redo)
             
-    # return
+    return out_paths
 
 
     # import matplotlib.pyplot as plt
@@ -753,4 +869,88 @@ def mosaic_tile(chunk_nr: str = "005_017", chunksize: int = 512 * 7):
 
 
 
+def process_chunk_wrapper(args, verbose: bool = False, redo=False):
+    return mosaic_tile(**args, verbose=verbose, redo=redo)
+
+def mosaic_all_tiles(chunksize: int = 512 * 7, n_workers: int | None = 8, redo = False):
+
+    chunk_nrs = [fp.stem.replace("chunk_", "").replace("_count", "") for fp in Path(f"temp.svalbard/medians/svalbard/dem/median_filt_075_dem_2024_chunks_{chunksize}/").glob("chunk_*count.tif")]
+    chunk_nrs.sort()
+
+    call_args = []
+    all_out_paths = []
+    for chunk_nr in chunk_nrs:
+
+        parts = chunk_nr.split("_")
+
+        # Do only Austfonna
+        # if (parts[0] <= "001") or (parts[0] >= "011") or (parts[1] < "010") or (parts[1] > "022"):
+        #     continue
+
+        # Do only Edgeøya
+        # if (parts[0] < "016") or (parts[0] > "021") or (parts[1] < "016") or (parts[1] > "021"):
+        #     continue
+
+        if not Path(f"temp.svalbard/medians/svalbard/dem_noncoreg/median_dem_2017_chunks_3584/chunk_{chunk_nr}.tif").is_file() and not redo:
+            continue
         
+        out_paths = get_mosaic_filenames(chunk_nr=chunk_nr, chunksize=chunksize)
+
+        if not all(fp.is_file() for fp in out_paths.values()):
+            call_args.append({"chunk_nr": chunk_nr, "chunksize": chunksize})
+            # continue # TEMPORARY
+
+        all_out_paths.append(out_paths)
+
+    if len(call_args) > 0:
+        if n_workers == 1:
+            for args in tqdm.tqdm(call_args,smoothing=0.1, desc="Mosaicking and fitting trend.", disable=True):
+                process_chunk_wrapper(args, verbose=True, redo=redo)
+        else:
+            tqdm.contrib.concurrent.process_map(process_chunk_wrapper, call_args, max_workers=n_workers, smoothing=0.1, desc="Mosaicking and fitting trend.")
+
+
+    per_key_filepaths = {}
+    for paths in all_out_paths:
+
+        for key in paths:
+            if key not in per_key_filepaths:
+                per_key_filepaths[key] = []
+            
+            per_key_filepaths[key].append(paths[key].absolute())
+
+    out_dir = Path(f"temp.svalbard/filt/svalbard/mosaics_{chunksize}/")
+
+    from osgeo import gdal
+    gdal.UseExceptions()
+
+    periods = {
+                "0": "2013-2018",
+                "1": "2019-2024",
+                "full": "2013-2024",
+            }
+
+
+    out_dir.mkdir(exist_ok=True)
+    # raise NotImplementedError()
+
+    for key in per_key_filepaths:
+
+        name = key
+        if key.startswith("20"):
+            name = f"dem_{key}"
+        elif "accel" in key:
+            name = f"trend_{periods['full']}_{'_'.join(key.split('_')[::-1])}"
+        elif (period := key.split("_")[1]) in ["0", "1", "full"]:
+            name = f"trend_{periods[period]}_{key.split('_')[0]}"
+            
+
+        out_path = out_dir / f"{name}.vrt"
+        gdal.BuildVRT(
+            str(out_path),
+            [str(fp) for fp in filter(lambda fp: fp.is_file(), per_key_filepaths[key])]
+        )
+      
+
+if __name__ == "__main__":
+    mosaic_all_tiles()
