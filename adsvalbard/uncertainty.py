@@ -1,3 +1,4 @@
+from adsvalbard import outlines, vert_coreg
 import rasterio as rio
 import pandas as pd
 import geopandas as gpd
@@ -143,7 +144,7 @@ def apply_function(chunk_dir: Path, func, pred_col: str, var_cols: list[str], re
     for key in var_cols:
         with rio.open(paths[key]) as raster:
             window = rio.windows.from_bounds(*bounds, raster.transform)
-            print((meta["height"], meta["width"]), window)
+            # print((meta["height"], meta["width"]), window)
             arr = raster.read(1, masked=True, window=window, boundless=True)
             arrs[key] = (arr * raster.scales[0] + raster.offsets[0]).filled(np.nan).ravel()
 
@@ -175,71 +176,185 @@ def sample_wrapper(kwargs):
     points = kwargs["points"]
     vals = adsvalbard.rasters.sample_raster(filepath=kwargs["filepath"], geometry=points.geometry)
 
-    tag = adsvalbard.rasters.sample_raster(filepath=kwargs["filepath"].with_name(kwargs["filepath"].name.replace("_dem.tif", "_matchtag.tif")), geometry=points.geometry) == 1
-    vals[~tag] = np.nan
+    if kwargs.get("apply_matchtag", False):
+        tag = adsvalbard.rasters.sample_raster(filepath=kwargs["filepath"].with_name(kwargs["filepath"].name.replace("_dem", "_matchtag")), geometry=points.geometry) == 1
+        vals[~tag] = np.nan
+    if (coreg := kwargs.get("vertcoreg_results", None)) is not None:
+        corr = coreg["a"] * (points.geometry.x - coreg["center_x"]) + coreg["b"] * (points.geometry.y - coreg["center_y"]) + coreg["c"]
+        vals += corr
+
+    if (outlier_threshold := kwargs.get("outlier_threshold", None)) is not None:
+        # outlier_proba_path = Path("temp.svalbard/out / f"{year}/{path.stem}_outlier_proba.tif"
+
+        outliers = adsvalbard.rasters.sample_raster(filepath=kwargs["outlier_proba_filepath"], geometry=points.geometry) > (outlier_threshold * 255)
+        vals[outliers] = np.nan
+
 
     return pd.Series(vals, index=pd.MultiIndex.from_arrays((points["id"], [kwargs["dem_title"]] * points.shape[0]), names=["id", "title"]))
-    return points
 
-def check_bad_pts(gui: bool = False):
+def check_bad_pts(prefix: str = "", gui: bool = False):
 
-    ylims = {
-        "001": [528, 585],
-        "002": [402, 621],
-        "003": [177, 227],
-        "004": [97, 150],
-        "005": [415, 531],
-        "006": [147, 260],
-        "007": [554, 583],
-        "008": [546, 579],
-        "009": [955, 970],
-        "010": [675, 742],
-        "011": [373, 453],
-        "012": [449, 480],
-        "013": [148, 205],
-        "014": [283, 347],
-        "015": [262, 286],
-        "016": [114, 268],
-        "017": [684, 737],
-        "018": [664, 691],
-        "019": [510, 573],
-        "020": [517, 540],
-        "021": [481, 533],
-        "022": [1190, 1209],
-        "023": [900, 921],
-        "024": [603, 641],
-        "025": [399, 508],
-        "026": [181, 221],
-        "027": [201, 247],
-        "028": [183, 227],
-        "029": [268, 293],
-        "030": [626, 670],
-        "031": [933, 973],
-        "032": [551, 599],
-        "033": [731, 756],
-        "034": [344, 374],
-        "035": [267, 317],
-        "036": [475, 520],
-        "037": [371, 388],
-        "038": [625, 647],
-        "039": [550, 590],
-        "040": [317, 345],
-        "041": [472, 498],
-        "042": [58, 84],
-        "043": [203, 236],
-        "044": [360, 408],
-        "045": [790, 809],
-        "046": [416, 446],
-        "047": [466, 486],
-        "048": [327, 344],
-        "049": [232, 286],
-        "050": [275, 314],
-        "051": [63, 78],
-        "052": [313, 345],
-        "053": [536, 553],
-        "054": [134, 150],
-        "055": [204, 255],
+    all_ylims = {
+        "": {  # This means un-coregistered
+    		"001": [528, 585],
+			"002": [402, 621],
+			"003": [177, 227],
+			"004": [97, 150],
+			"005": [415, 531],
+			"006": [147, 260],
+			"007": [554, 583],
+			"008": [546, 579],
+			"009": [955, 970],
+			"010": [675, 742],
+			"011": [373, 453],
+			"012": [449, 480],
+			"013": [148, 205],
+			"014": [283, 347],
+			"015": [262, 286],
+			"016": [114, 268],
+			"017": [695, 726],
+			"018": [664, 691],
+			"019": [510, 573],
+			"020": [517, 540],
+			"021": [481, 533],
+			"022": [1190, 1209],
+			"023": [900, 921],
+			"024": [603, 641],
+			"025": [423, 460],
+			"026": [181, 221],
+			"027": [201, 247],
+			"028": [183, 227],
+			"029": [268, 293],
+			"030": [626, 670],
+			"031": [933, 973],
+			"032": [551, 599],
+			"033": [731, 756],
+			"034": [344, 374],
+			"035": [267, 317],
+			"036": [475, 520],
+			"037": [371, 388],
+			"038": [625, 647],
+			"039": [550, 590],
+			"040": [317, 345],
+			"041": [472, 498],
+			"042": [58, 84],
+			"043": [203, 236],
+			"044": [360, 408],
+			"045": [790, 809],
+			"046": [416, 446],
+			"047": [466, 486],
+			"048": [327, 344],
+			"049": [232, 286],
+			"050": [275, 314],
+			"051": [63, 78],
+			"052": [313, 345],
+			"053": [536, 553],
+			"054": [134, 145],
+			"055": [204, 255],
+			"056": [544, 621],
+			"057": [404, 451],
+			"058": [542, 575],
+			"059": [587, 637],
+			"060": [157, 201],
+			"061": [189, 228],
+			"062": [395, 411],
+			"063": [584, 618],
+			"064": [586, 607],
+			"065": [610, 648],
+			"066": [466, 482],
+			"067": [437, 454],
+			"068": [426, 493],
+			"069": [771, 864],
+			"071": [679, 688],
+			"072": [716, 730],
+			"073": [389, 414],
+			"074": [198, 286],
+			"075": [623, 644],
+			"076": [911, 927],
+			"077": [563, 589],
+			"078": [217, 304],
+			"079": [325, 372],
+			"080": [249, 267],
+			"081": [326, 367],
+        },
+        "dem_vertcoreg_old": {
+            "001": [557, 568],
+            "003": [200, 204],
+            "005": [458, 476],
+            "007": [569, 573],
+            "008": [546, 580],
+            "020": [529, 533],
+            "024": [615, 628],
+            "025": [420, 460],
+            "027": [211, 231],
+            "028": [181, 227],
+            "029": [260, 293],
+            "038": [628, 639],
+            "039": [563, 573],
+            "041": [482, 491],
+            "042": [58, 74],
+            "045": [790, 809],
+            "046": [420, 443],
+            "049": [238, 270],
+            "050": [288, 310],
+            "051": [65, 81],
+            "052": [317, 339],
+            "053": [537, 553],
+            "055": [232, 237],
+            "056": [597, 605],
+            "058": [557, 563],
+            "059": [604, 628],
+            "060": [180, 184],
+            "082": [429, 471],
+        },
+        "dem_vertcoreg": {
+			"001": [516, 578],
+			"003": [192, 214],
+			"005": [456, 477],
+			"008": [554, 574],
+			"025": [417, 460],
+			"029": [264, 293],
+			"038": [619, 645],
+			"039": [549, 601],
+			"040": [299, 409],
+			"041": [479, 494],
+			"042": [50, 88],
+			"046": [423, 439],
+			"049": [232, 285],
+			"052": [322, 339],
+			"055": [213, 257],
+			"056": [457, 682],
+			"058": [538, 608],
+			"064": [565, 625],
+			"065": [614, 647],
+			"082": [429, 476],
+			"083": [704, 743],
+			"085": [319, 337],
+			"086": [149, 172],
+			"087": [519, 557],
+			"089": [162, 166],
+			"090": [771, 785],
+        },
+        "dem": {  # This means co-registered DEMs
+			"011": [376, 381],
+			"012": [429, 434],
+			"013": [136, 164],
+			"014": [271, 298],
+			"015": [235, 251],
+			"016": [139, 152],
+			"017": [633, 716],
+			"019": [510, 516],
+			"048": [306, 328],
+			"069": [769, 770],
+			"071": [651, 652],
+			"079": [315, 324],
+			"080": [223, 238],
+
+        }
     }
+    if prefix not in all_ylims:
+        print(f"Prefix {prefix} not encountered before")
+    ylims = all_ylims.get(prefix, {})
 
     points = gpd.read_file("shapes/bad_vertcoreg_pts.geojson")
     n_points = points.shape[0]
@@ -251,25 +366,71 @@ def check_bad_pts(gui: bool = False):
     joined["datetime"] = pd.to_datetime(joined["datetime"])
     joined["year"] = joined["datetime"].dt.year + joined["datetime"].dt.month / 12
 
+    vertcoreg_results = []
+    for filepath in Path("temp.svalbard/vertcoreg_results/").glob("*.csv"):
+        new = pd.read_csv(filepath, index_col=0)
+        vertcoreg_results.append(new)
+
+    vertcoreg_results = pd.concat(vertcoreg_results)
+
+    crs = strips.crs
+    apply_matchtag = True
+    if prefix == "":
+        filepath_pattern = lambda title: Path(f"data/ArcticDEM/{title}_dem.tif")
+        crs = 3413
+    elif prefix == "dem_vertcoreg":
+        filepath_pattern = lambda title: Path(f"temp.svalbard/arcticdem_vrts/{title}_dem_epsg32633.vrt")
+
+    elif prefix == "dem":  # This means co-registered
+        filepath_pattern = lambda title: Path(f"temp.svalbard/arcticdem_coreg/{title}_dem_coreg.tif")
+        apply_matchtag = False
+    # elif prefix == "dem_noncoreg":
+    #     filepath_pattern = lambda title: Path(f"temp.svalbard/arcticdem_vrts/{title}_dem_epsg32633.vrt")
+
+    #     import adsvalbard.mosaicking
+    #     biases = {}
+    #     for year in range(2013, 2025):
+    #         biases[year] = adsvalbard.mosaicking.get_uncorr_bias(year)
+            
+    else:
+        raise NotImplementedError()
+
     titles = []
     years = []
     sample_call_args = []
+    skip_pts = []
     for title, grouped in joined.groupby("title"):
-        filepath = Path(f"data/ArcticDEM/{title}_dem.tif")
-
-
+        grouped = grouped[~grouped["id"].isin(skip_pts)]
+        if grouped.shape[0] == 0:
+            continue
+        if prefix == "dem" and title in vertcoreg_results.index:
+            skip_pts += grouped["id"].unique().tolist()
+            continue
+        filepath = filepath_pattern(title)
         if not filepath.is_file():
             continue
         years.append(grouped["year"].iloc[0])
         titles.append(title)
         sample_call_args.append(
             {
-                "points": grouped[["id", "geometry", "year"]].to_crs(3413).copy(),
+                "points": grouped[["id", "geometry", "year"]].to_crs(crs).copy(),
                 "filepath": filepath,
                 "dem_title": title,
+                "apply_matchtag": apply_matchtag,
             }
         )
 
+        if prefix == "dem_vertcoreg":
+            try:
+                sample_call_args[-1]["vertcoreg"] = vertcoreg_results.loc[title].to_dict()
+            except KeyError:
+                sample_call_args = sample_call_args[:-1]
+        elif prefix == "dem":
+            sample_call_args[-1]["outlier_proba_filepath"] = Path(f"temp.svalbard/outlier_proba/{grouped['datetime'].iloc[0].year}/{filepath.stem}_outlier_proba.tif")
+            sample_call_args[-1]["outlier_threshold"] = 0.75
+        # elif prefix == "dem_noncoreg":
+        #     sample_call_args[-1]["bias"] = biases[grouped["datetime"].iloc[0].year]
+            
     years = pd.Series(years, index=titles)
 
     # print(sample_wrapper(sample_call_args[1]))
@@ -304,8 +465,10 @@ def check_bad_pts(gui: bool = False):
 
         for title, isbad in bad.items():
             if isbad:
+                if prefix == "dem_vertcoreg":
+                    bad_titles.add(title)
                 # Only mark bad if we've never (or not yet twice) seen it as good
-                if good_counts[title] < 3:
+                elif good_counts[title] < 3:
                     bad_titles.add(title)
                 # bad_titles.add(title)
             else:
@@ -313,10 +476,12 @@ def check_bad_pts(gui: bool = False):
                 # Count good observations
                 good_counts[title] += 1
                 # If at least two good observations, it's no longer bad
-                if good_counts[title] >= 3:
+                if good_counts[title] >= 3 and prefix != "dem_vertcoreg":
                     bad_titles.discard(title)  # discard: no error if not present
 
-    Path("temp.svalbard/bad_dems.txt").write_text("\n".join(bad_titles))
+    if len(prefix) > 0:
+        prefix = f"_{prefix}"
+    Path(f"temp.svalbard/bad_dems{prefix}.txt").write_text("\n".join(bad_titles))
 
     if gui:
         import matplotlib.pyplot as plt
@@ -332,13 +497,17 @@ def check_bad_pts(gui: bool = False):
 
             axis = axes[i]
             axis.set_title(point_id)
-            # if point_id in ylims:
-            #     axis.set_ylim(*ylims[point_id])
+            if point_id in ylims:
+                axis.set_ylim(*ylims[point_id])
             axis.scatter(vals.index, vals, c=np.isin(titles, list(bad_titles)).astype(int))
-        plt.subplots_adjust(bottom=0.2)
+        plt.subplots_adjust(bottom=0.2, hspace=0.4, wspace=0.4)
         from matplotlib.widgets import Button
         button_ax = fig.add_axes([0.4, 0.05, 0.2, 0.075])  # [left, bottom, width, height]
         button = Button(button_ax, 'Get y-lims')
+
+        initial_ylims = []
+        for axis in fig.axes:
+            initial_ylims.append([round(v) for v in axis.get_ylim()])
 
         def on_button_clicked(event):
             # Loop over all axes in the figure
@@ -350,14 +519,21 @@ def check_bad_pts(gui: bool = False):
                 if i >= len(point_labels):
                     continue
                 ylim = [round(v) for v in ax.get_ylim()]
-                print(f'"{point_labels[i]}": {ylim},')
+
+                if point_labels[i] not in ylims and ylim[0] == initial_ylims[i][0] and ylim[1] == initial_ylims[i][1]:
+                    continue
+                print(f'\t\t\t"{point_labels[i]}": {ylim},')
         button.on_clicked(on_button_clicked)
+
 
         plt.show()
     
 
-def main():
+def main(redo: bool = False):
+    from osgeo import gdal
+    gdal.UseExceptions()
 
+    temp_dir = get_temp_dir()
     points = sample_points()
 
     var_cols = ["terr_slope", "terr_slope_of_slope"]
@@ -376,9 +552,22 @@ def main():
     # pred_col = "trend_2013-2024_slope"
         se_col = var_name_to_se_name(pred_col)
         func = make_err_function(points, pred_col=pred_col, var_cols=var_cols)
+        out_paths = []
 
         for chunk_dir in tqdm.tqdm(chunk_dirs, desc=f"Applying err functions for {pred_col}"):
-            apply_function(chunk_dir, func=func, pred_col=pred_col, var_cols=var_cols)
+            try:
+                out_path = apply_function(chunk_dir, func=func, pred_col=pred_col, var_cols=var_cols, redo=redo)
+                out_paths.append(str(out_path))
+            except KeyboardInterrupt:
+                raise
+            except Exception as e:
+                print(f"Error on {chunk_dir}: {e}")
+
+        gdal.BuildVRT(
+            str(temp_dir / f"{pred_col}_err_sigma1.vrt"),
+            out_paths,
+        )
+
     return
     points["dh_err_pred"] = np.hypot(func(points[var_cols]), points[se_col]) 
 

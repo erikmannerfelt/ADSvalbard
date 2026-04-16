@@ -17,3 +17,8 @@ shapes/arcticdem_bad_patches.qmd
 /SETSM_s2s041*
 figures/
 tmp.fig/
+.ipynb_checkpoints/
+*.txt
+*.tif
+vgm_neff_cirq.csv
+tmp/

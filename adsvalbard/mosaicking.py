@@ -307,7 +307,7 @@ def get_dem_chunk_path(kind: str, chunk_nr: str, chunksize: int, year: int) -> P
 
     return stack_dir / f"dem/median_filt_{kind}_dem_{year}_chunks_{chunksize}/chunk_{chunk_nr}.tif"
 
-def load_and_mosaic_dem(chunk_nr: str, chunksize: int, year: int, return_uncorr: bool = False, min_uncorr_count: int = 3, min_vertcorr_count: int = 2):
+def load_and_mosaic_dem(chunk_nr: str, chunksize: int, year: int, return_uncorr: bool = False, min_uncorr_count: int = 3, min_vertcorr_count: int = 1, use_vertcoreg: bool = True):
     nmad_thresholds = {
         "p75": 10.,
         "p95": 30.,
@@ -327,14 +327,16 @@ def load_and_mosaic_dem(chunk_nr: str, chunksize: int, year: int, return_uncorr:
         doy = quality_flag.copy().astype("uint16")
         xy_coords = np.dstack(np.meshgrid(np.linspace(raster.bounds.left, raster.bounds.right, raster.width), np.linspace(raster.bounds.bottom, raster.bounds.top, raster.height)[::-1])).reshape((-1, 2))
 
-    ocean = read_coastline(year=year, meta=meta)
+    ocean = read_coastline(year=str(year), meta=meta)
 
     uncorr_dem = {}
 
     prev_mask = np.zeros(dem.shape, dtype=bool)
     vertcoreg_exists = False
     for i, key in [(4, "vertcoreg"), (1, "p75"), (2, "p95"), (3, "uncorr")]:
-        if key == "vertcoreg":
+        if key == "vertcoreg" and not use_vertcoreg:
+            continue
+        elif key == "vertcoreg":
             if not paths[key].is_file():
                 continue
             vertcoreg_exists = True
@@ -351,7 +353,7 @@ def load_and_mosaic_dem(chunk_nr: str, chunksize: int, year: int, return_uncorr:
 
         with rio.open(paths[key].with_stem(paths[key].stem + "_count")) as raster:
             arr = raster.read(1, masked=True).filled(0)
-            if key in ["uncorr", "vertcorr"]:
+            if key in ["uncorr", "vertcoreg"]:
                 good_count = arr >= (min_uncorr_count if key == "uncorr" else min_vertcorr_count)
                 mask = mask & good_count
                 arr[~good_count] = 0
@@ -448,7 +450,7 @@ def write_formatted(key, fp, arr, params, verbose: bool = True, redo: bool = Fal
         ).astype("uint8")
         scale = 2. / umax
         nodata = umax + 1
-    elif key.startswith("trend_") or key == "accel":
+    elif key.startswith("slope_") or key == "accel":
         info = np.iinfo(np.int16)
         nodata = info.min
         umin = info.min + 1
@@ -717,31 +719,62 @@ def mosaic_tile(chunk_nr: str = "007_004", chunksize: int = 512 * 7, verbose: bo
     dems = []
     flags = []
     oceans = []
-    weights = compute_weight_field(meta=params, bad_regions=bad_regions)
+    weights = compute_weight_field(meta=params, bad_regions=bad_regions, R=2000)
+
+    # import matplotlib.pyplot as plt
+    # plt.imshow(weights)
+    # plt.show()
+    # return
 
     for year in years:
         if verbose:
             print(year)
 
-        out = load_and_mosaic_dem(chunk_nr=chunk_nr, chunksize=chunksize, year=year, return_uncorr=weights is not None)
-
-        if np.any(out["quality"] == 4) and weights is not None:
-            print("PRELININARY DISABLING WEIGHTS")
-            weights = None
-
+        # Load and mosaic the different DEM qualities. If vertcoreg tiles exist, use them.
+        out = load_and_mosaic_dem(chunk_nr=chunk_nr, chunksize=chunksize, year=year, use_vertcoreg=weights is not None)
+        # If the chunk is close to a bad region, it will have weights to blend between vertcoreg and normal coreg:
         if weights is not None:
-            out["dem"], out["count"], out["nmad"], out["doy"] = blend_bands(
-                dem_a=out["dem"],
-                count_a=out["count"],
-                nmad_a=out["nmad"],
-                doy_a=out["doy"],
-                dem_b=out["uncorr"]["dem"],
-                count_b=out["uncorr"]["count"],
-                nmad_b=out["uncorr"]["nmad"],
-                doy_b=out["uncorr"]["doy"],
-                weight_B=weights,
-            )
-            out["quality"][weights > 0] = 3
+            # import matplotlib.pyplot as plt
+            # plt.imshow(weights.reshape((params["height"], params["width"])))
+            # plt.show()
+            # If the chunk is completely within a bad coreg region, then the vertcoreg will already have been loaded
+            # and taken precedence. Therefore, nothing more needs to be done
+            # If the chunk is at the boundary, all weights will not be 1 and blending is required
+            if not np.all(weights == 1.):
+                # Load the data again but without vertcoreg
+                nonvertcoreg = load_and_mosaic_dem(chunk_nr=chunk_nr, chunksize=chunksize, year=year, use_vertcoreg=False)
+                # Blend between vertcoreg and non-vertcoreg
+                out["dem"], out["count"], out["nmad"], out["doy"] = blend_bands(
+                    dem_a=nonvertcoreg["dem"],
+                    count_a=nonvertcoreg["count"],
+                    nmad_a=nonvertcoreg["nmad"],
+                    doy_a=nonvertcoreg["doy"],
+                    dem_b=out["dem"],
+                    count_b=out["count"],
+                    nmad_b=out["nmad"],
+                    doy_b=out["doy"],
+                    weight_B=weights,
+                )
+                out["quality"][weights == 0.] = nonvertcoreg["quality"][weights == 0.]
+                del nonvertcoreg
+                
+        # if np.any(out["quality"] == 4) and weights is not None:
+        #     print("PRELININARY DISABLING WEIGHTS")
+        #     weights = None
+
+        # if weights is not None:
+        #     out["dem"], out["count"], out["nmad"], out["doy"] = blend_bands(
+        #         dem_a=out["dem"],
+        #         count_a=out["count"],
+        #         nmad_a=out["nmad"],
+        #         doy_a=out["doy"],
+        #         dem_b=out["uncorr"]["dem"],
+        #         count_b=out["uncorr"]["count"],
+        #         nmad_b=out["uncorr"]["nmad"],
+        #         doy_b=out["uncorr"]["doy"],
+        #         weight_B=weights,
+        #     )
+        #     out["quality"][weights > 0] = 3
 
         dems.append(out["dem"].ravel()[:, None])
         flags.append(out["quality"].ravel()[:, None])
@@ -869,12 +902,33 @@ def mosaic_tile(chunk_nr: str = "007_004", chunksize: int = 512 * 7, verbose: bo
 
 
 
-def process_chunk_wrapper(args, verbose: bool = False, redo=False):
-    return mosaic_tile(**args, verbose=verbose, redo=redo)
+def process_chunk_wrapper(args, verbose: bool = False):
+    return mosaic_tile(**args, verbose=verbose)
 
 def mosaic_all_tiles(chunksize: int = 512 * 7, n_workers: int | None = 8, redo = False):
 
-    chunk_nrs = [fp.stem.replace("chunk_", "").replace("_count", "") for fp in Path(f"temp.svalbard/medians/svalbard/dem/median_filt_075_dem_2024_chunks_{chunksize}/").glob("chunk_*count.tif")]
+    # chunk_nrs = [fp.stem.replace("chunk_", "").replace("_count", "") for fp in Path(f"temp.svalbard/medians/svalbard/dem/median_filt_075_dem_2024_chunks_{chunksize}/").glob("chunk_*count.tif")]
+
+    import adsvalbard.stacking
+
+    # Hacky way to get only the chunks that exist in all years
+    chunk_nrs = []
+    for year in range(2013, 2025):
+        for raster_type in ["dem", "dem_noncoreg"]:
+            # print(f"{raster_type}: {year}")
+            filt = [0.75, 0.95] if raster_type == "dem" else [0.75]
+
+            for threshold in filt:
+                new_paths = adsvalbard.stacking.create_median_stack(years=year, n_threads=2,raster_type=raster_type, outlier_threshold=threshold)
+                new_chunk_nrs = [fp.stem.replace("chunk_", "") for fp in new_paths]
+
+                if len(chunk_nrs) == 0:
+                    chunk_nrs = new_chunk_nrs
+                else:
+                    chunk_nrs = [ch for ch in new_chunk_nrs if ch in chunk_nrs]
+    import os
+
+    # return
     chunk_nrs.sort()
 
     call_args = []
@@ -891,13 +945,13 @@ def mosaic_all_tiles(chunksize: int = 512 * 7, n_workers: int | None = 8, redo =
         # if (parts[0] < "016") or (parts[0] > "021") or (parts[1] < "016") or (parts[1] > "021"):
         #     continue
 
-        if not Path(f"temp.svalbard/medians/svalbard/dem_noncoreg/median_dem_2017_chunks_3584/chunk_{chunk_nr}.tif").is_file() and not redo:
-            continue
+        # if not Path(f"temp.svalbard/medians/svalbard/dem_noncoreg/median_dem_2017_chunks_3584/chunk_{chunk_nr}.tif").is_file() and not redo:
+        #     continue
         
         out_paths = get_mosaic_filenames(chunk_nr=chunk_nr, chunksize=chunksize)
 
-        if not all(fp.is_file() for fp in out_paths.values()):
-            call_args.append({"chunk_nr": chunk_nr, "chunksize": chunksize})
+        if not all(fp.is_file() for fp in out_paths.values()) or redo:
+            call_args.append({"chunk_nr": chunk_nr, "chunksize": chunksize, "redo": redo})
             # continue # TEMPORARY
 
         all_out_paths.append(out_paths)
@@ -905,7 +959,7 @@ def mosaic_all_tiles(chunksize: int = 512 * 7, n_workers: int | None = 8, redo =
     if len(call_args) > 0:
         if n_workers == 1:
             for args in tqdm.tqdm(call_args,smoothing=0.1, desc="Mosaicking and fitting trend.", disable=True):
-                process_chunk_wrapper(args, verbose=True, redo=redo)
+                process_chunk_wrapper(args, verbose=True)
         else:
             tqdm.contrib.concurrent.process_map(process_chunk_wrapper, call_args, max_workers=n_workers, smoothing=0.1, desc="Mosaicking and fitting trend.")
 

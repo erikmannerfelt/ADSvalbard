@@ -9,13 +9,22 @@ def create_dem_blend(key: str, bounds: dict[str, float | int], start_year: int, 
     dirname = Path(f"temp/subsets/{key}/")
 
     out_path = dirname / f"{key}_dem_{start_year}.tif"
+    out_date_path = dirname / f"{key}_dem_{start_year}_date.tif"
 
     if out_path.is_file():
+        import os
+        os.remove(out_path)
+    if out_path.is_file() and out_date_path.is_file():
         return out_path
 
     import rasterio.fill
     def get_dem_path(year) -> Path:
-        return Path(f"temp.svalbard/medians/svalbard/dem/median_filt_075_dem_{year}.vrt")
+        # return Path(f"temp.svalbard/medians/svalbard/dem/median_filt_075_dem_{year}.vrt")
+        return Path(f"temp.svalbard/filt/svalbard/mosaics_3584/dem_{year}_dem.vrt")
+
+    def get_doy_path(year) -> Path:
+        dem_path = get_dem_path(year)
+        return dem_path.with_name(dem_path.name.replace("_dem.vrt", "_doy.vrt"))
 
     bounds = rasterio.coords.BoundingBox(**bounds)
     # start_year: int = data[key]["start_year"]
@@ -24,12 +33,15 @@ def create_dem_blend(key: str, bounds: dict[str, float | int], start_year: int, 
     with rasterio.open(get_dem_path(start_year)) as raster:
         window = rasterio.windows.from_bounds(*bounds, transform=raster.transform)
 
-        arr = raster.read(1, window=window, masked=True).filled(np.nan)
+        arr = (raster.read(1, window=window, masked=True).astype("float32") * raster.scales[0]).filled(np.nan)
 
-        # print(window)
+
+    with rasterio.open(get_doy_path(start_year)) as raster:
+        date = (start_year * 1000) + raster.read(1, window=window, masked=True).astype("uint32").filled(0)
+
 
     n_missing = 0
-    for year in reversed(range(2012, start_year)):
+    for year in reversed(range(2013, start_year)):
         missing_data = ~np.isfinite(arr)
 
         n_missing = np.count_nonzero(missing_data)
@@ -37,9 +49,11 @@ def create_dem_blend(key: str, bounds: dict[str, float | int], start_year: int, 
             break
 
         with rasterio.open(get_dem_path(year)) as raster:
-            arr[missing_data] = raster.read(1, window=window, masked=True).filled(
+            arr[missing_data] = (raster.read(1, window=window, masked=True).astype("float32") * raster.scales[0]).filled(
                 np.nan
             )[missing_data]
+        with rasterio.open(get_doy_path(year)) as raster:
+            date[missing_data] = (year * 1000) + raster.read(1, window=window, masked=True).filled(0)[missing_data].astype("uint32")
 
 
     # plt.imshow(arr)
@@ -47,30 +61,41 @@ def create_dem_blend(key: str, bounds: dict[str, float | int], start_year: int, 
     # return
     #
     arr = rasterio.fill.fillnodata(arr, mask=np.isfinite(arr))
+    date = rasterio.fill.fillnodata(date, mask=date != 0)
 
     if n_missing != 0:
-        arr[~np.isfinite(arr)] = fill_value
+        mask = ~np.isfinite(arr)
+        arr[mask] = fill_value
+        date[mask] = np.median(date[date != 0])
 
     with rasterio.open(get_dem_path(start_year)) as raster0:
         transform = rasterio.windows.transform(window, raster0.transform)
         dirname.mkdir(exist_ok=True, parents=True)
-        with rasterio.open(
-            out_path,
-            "w",
-            **(
-                raster.meta
-                | {
+
+        out_meta = raster.meta | {
                     "driver": "GTiff",
                     "transform": transform,
                     "height": arr.shape[0],
                     "width": arr.shape[1],
+                    "compress":"deflate",
+                    "tiled": True,
+                    "dtype": "float32",
                 }
-            ),
-            compress="deflate",
+        with rasterio.open(
+            out_path,
+            "w",
+            **out_meta,
             zlevel=12,
-            tiled=True,
         ) as raster:
             raster.write(arr, 1)
+
+        with rasterio.open(
+            out_date_path,
+            "w",
+            **(out_meta | {"dtype": "uint32", "nodata": 0}),
+            zlevel=9,
+        ) as raster:
+            raster.write(date, 1)
     return out_path
     
 

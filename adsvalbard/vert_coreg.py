@@ -1,3 +1,5 @@
+from adsvalbard.mosaicking import write_formatted
+from adsvalbard.outlines import generate_full_glacier_mask
 import rasterio as rio
 import geopandas as gpd
 import pandas as pd
@@ -8,8 +10,10 @@ import warnings
 import tqdm
 import tqdm.contrib.concurrent
 import json
+import tempfile
 
 from pathlib import Path
+from adsvalbard.constants import CONSTANTS
 
 def sample_raster(filepath, points):
 
@@ -53,7 +57,8 @@ def sample_dem(matchtag_fp: Path, sample_pts: np.ndarray) -> dict[str, np.ndarra
 def sample_dem_wrapper(args):
     return sample_dem(**args)
 
-def coregister_vert_year(year: int, bounds: rio.coords.BoundingBox, label: str | None = None, n_points: int = 1000, verbose: bool = True, redo: bool = False) -> pd.Series:
+def coregister_vert_year(year: int, bounds: rio.coords.BoundingBox, label: str | None = None, n_points: int = 300, verbose: bool = True, redo: bool = False,max_slope = 10.0 / 50000.0) -> pd.Series:
+    
 
     if label is not None:
         label = f"_{label}"
@@ -64,7 +69,7 @@ def coregister_vert_year(year: int, bounds: rio.coords.BoundingBox, label: str |
     out_meta_path = out_path.with_name(out_path.stem + "_meta.json")
 
     if all(fp.is_file() for fp in (out_path, out_meta_path)) and not redo:
-        return pd.read_csv(out_path, header=None, index_col=0).squeeze()
+        return pd.read_csv(out_path, index_col=0)
 
     bounds_shp = shapely.geometry.box(*bounds)
 
@@ -73,6 +78,7 @@ def coregister_vert_year(year: int, bounds: rio.coords.BoundingBox, label: str |
     all_strips = all_strips[all_strips["datetime"].dt.year == year]
 
     bad_titles = Path("temp.svalbard/bad_dems.txt").read_text().splitlines()
+    bad_titles = list(set(bad_titles + Path("temp.svalbard/bad_dems_dem_vertcoreg.txt").read_text().splitlines()))
     all_strips = all_strips[~all_strips["title"].isin(bad_titles)]
 
     all_strips = all_strips[all_strips.intersects(bounds_shp)]
@@ -87,7 +93,6 @@ def coregister_vert_year(year: int, bounds: rio.coords.BoundingBox, label: str |
 
     sample_points["x"] = sample_points.geometry.x
     sample_points["y"] = sample_points.geometry.y
-    sample_points = sample_points.sort_values(["x", "y"])
 
     if verbose:
         print("Reading land outlines")
@@ -105,7 +110,16 @@ def coregister_vert_year(year: int, bounds: rio.coords.BoundingBox, label: str |
 
     sample_points["stable"] = ~sample_points.intersects(glaciers.geometry[0])
 
+    # import matplotlib.pyplot as plt
+    # plt.scatter(sample_points.geometry.x, sample_points.geometry.y, c=sample_points["stable"])
+    # plt.show()
+    # raise NotImplemented
+
+    sample_points = sample_points.sort_values(["x", "y"])
+
+    sample_points.to_feather(f"tmp/vertcoreg_sample_pts_{year}_{label}.arrow")
     sample_arr = np.column_stack((sample_points.geometry.x, sample_points.geometry.y))
+
     sample_points.loc[sample_points["stable"], "npi_dem"] = sample_raster("temp/npi_mosaic.vrt", sample_arr[sample_points["stable"]])
     def cost(params: np.ndarray,
          arrs: np.ndarray,
@@ -269,7 +283,6 @@ def coregister_vert_year(year: int, bounds: rio.coords.BoundingBox, label: str |
     # Initial parameters: zeros (no correction)
     # x0 = np.zeros(3 * n_dems)
     x0 = np.tile([0.0, 0.0, -28.0], n_dems)
-    max_slope = 5.0 / 50000.0
 
     # lower and upper bounds for [a, b, c] of one DEM
     lb_one = [-max_slope, -max_slope, -np.inf]
@@ -283,6 +296,12 @@ def coregister_vert_year(year: int, bounds: rio.coords.BoundingBox, label: str |
     center_y = centroids.loc[dem_cols, "center_y"].values
 
     max_iters = 10000
+    # from multiprocessing import Pool
+
+    tol = 1e-7
+
+    # from IPython import embed
+    # embed()
 
     # Solve
     with tqdm.tqdm(total=max_iters, desc="Co-registering (max iters:)", disable=(not verbose)) as progress_bar:
@@ -290,11 +309,33 @@ def coregister_vert_year(year: int, bounds: rio.coords.BoundingBox, label: str |
             cost,
             loss="soft_l1",
             x0=x0,
+            ftol=tol,
+            gtol=tol,
+            xtol=tol,
+            # x_scale="jac",
+            # workers=Pool.map,
             max_nfev=max_iters,
             args=(dem_vals, stable_elev, x, y, center_x, center_y),
             kwargs={"progress_bar": progress_bar},
             bounds=(lb, ub),
         )
+    # res = noisyopt.minimizeCompass(
+    #     cost,
+    #     x0=x0,
+    #     args=(dem_vals, stable_elev, x, y, center_x, center_y),
+    #     bounds=np.column_stack((lb, ub)),
+    #     disp=True,
+    #     paired=False,
+    # )
+    # res = noisyopt.minimizeSPSA(
+    #     cost,
+    #     x0=x0,
+    #     args=(dem_vals, stable_elev, x, y, center_x, center_y),
+    #     bounds=np.column_stack((lb, ub)),
+    #     disp=True,
+    #     niter=1000,
+    #     paired=False,
+    # )
 
     params = res.x.reshape(n_dems, 3)   # columns: [a, b, c] per DEM
 
@@ -336,7 +377,7 @@ def coregister_vert_year(year: int, bounds: rio.coords.BoundingBox, label: str |
     shifts.to_csv(out_path)
 
     stats = {
-        "n_points": n_points,
+        "n_points": sample_points.shape[0],
         "n_stable_points": int(np.count_nonzero(sample_points["stable"])),
         "stable_terrain_median_pre": float(stable_terrain_before),
         "stable_terrain_median_post": float(stable_terrain_after),
@@ -400,24 +441,58 @@ def coregister_vert_year(year: int, bounds: rio.coords.BoundingBox, label: str |
     # return pd.read_csv(out_path, header=None, index_col=0).squeeze()
     
 
+def get_vertcoreg_region_bounds() -> dict[str, "rio.coords.BoundingBox"]:
+    chunk_outlines = gpd.read_file(CONSTANTS.temp_dir.with_stem("temp.svalbard") / "chunk_outlines.geojson")
+    bad_regions = gpd.read_file("shapes/bad_coreg_regions.geojson")
+
+    bounds = {}
+    for _, region in bad_regions.iterrows():
+        intersecting = chunk_outlines.intersects(region.geometry)
+
+        bounds[region["label"]] = rio.coords.BoundingBox(
+            *chunk_outlines.loc[
+                chunk_outlines.touches(
+                    chunk_outlines.loc[intersecting].dissolve().iloc[0]["geometry"]
+                )
+            ].total_bounds
+        )
+    
+    return bounds
+    # return {
+    #     "austfonna": rio.coords.BoundingBox(627722.5, 8800002.5, 760002.5, 8946162.5),
+    # }[label]
+
+
+
 def main(n_points: int = 5000, verbose: bool = True):
 
     import adsvalbard.stacking
-    bounds = rio.coords.BoundingBox(627722.5, 8784882.5,  753162.5, 8946162.5)
 
-    for year in range(2013, 2025):
-        # if year == 2015:
-        #     continue
-        print(year)
-        points = coregister_vert_year(year, label="austfonna", bounds=bounds, n_points=n_points, verbose=verbose, redo=True)
-        # raise NotImplementedError()
+    vertcoreg_region_bounds = get_vertcoreg_region_bounds()
 
-        # print(points)
-        # continue
+    for label, bounds in vertcoreg_region_bounds.items():
+        print(label)
+        for year in range(2013, 2025):
+            # if year == 2015:
+            #     continue
+            print(year)
+            kwargs = {}
+            # There's so little stable terrain that deramp is ill posed
+            if label == "kvitoya":
+                kwargs["max_slope"] = 1e-3
+            # print("NOTE: REDOING KVITOYA")
+            points = coregister_vert_year(year, label=label, bounds=bounds, n_points=n_points, verbose=verbose, redo=False, **kwargs)
 
-        # return
-        # adsvalbard.stacking.create_median_stack(years=year, n_threads=5, raster_type="dem_vertcoreg", bounds_override=bounds, vertcoreg_label="austfonna", nchunks_override=1)
+            # raise NotImplementedError()
 
+            # print(points)
+            # continue
+
+            # return
+            # adsvalbard.stacking.create_median_stack(years=year, n_threads=5, raster_type="dem_vertcoreg", bounds_override=bounds, vertcoreg_label="austfonna", nchunks_override=1)
+
+    # return
+    # return
     # import adsvalbard.mosaicking
     # adsvalbard.mosaicking.mosaic_tile("005_018")
 
@@ -439,18 +514,25 @@ def main(n_points: int = 5000, verbose: bool = True):
     #   print(dir_path.is_dir())
     #   # print(chunk_nr)
 
+    # new_paths = adsvalbard.stacking.create_median_stack(years=2015, n_threads=2,raster_type="dem_noncoreg", vertcoreg_label="austfonna", outlier_threshold=0.95, bounds_override=bounds)
+    # chunk_nrs = [fp.stem for fp in new_paths]
+    # # return
+    # uniques, counts = np.unique(([fp.stem.replace("_count", "") for fp in Path("temp.svalbard/medians/svalbard/dem_vertcoreg/").rglob("*/chunk_*count.tif")]), return_counts=True)
+    # missing_vertcoreg_chunks = uniques[counts != 12].tolist() + [nr for nr in chunk_nrs if nr not in uniques]
+
+
+    # print([nr for nr in chunk_nrs if nr not in existing_vertcoreg_chunks])
+
     # return
 
-    new_paths = adsvalbard.stacking.create_median_stack(years=2021, n_threads=1,raster_type="dem_vertcoreg", vertcoreg_label="austfonna", outlier_threshold=0.95, bounds_override=bounds)
-    import os
 
-    chunk_nrs = [fp.stem for fp in new_paths]
-
-    for demdir in ["filt/svalbard/", "medians/svalbard/dem_noncoreg", "medians/svalbard/dem_vertcoreg"]:
-        for filepath in Path(f"temp.svalbard/{demdir}/").rglob("*chunk_*.tif"):
-            if filepath.stem not in chunk_nrs:
-                continue
-            os.remove(filepath)
+    # for demdir in ["filt/svalbard/chunks_3584/"]:#, "medians/svalbard/dem_vertcoreg"]:
+    #     for filepath in Path(f"temp.svalbard/{demdir}/").rglob("*chunk_*.tif"):
+    #         if not any(nr in filepath.stem for nr in missing_vertcoreg_chunks):
+    #             continue
+    #         # print(filepath)
+    #         os.remove(filepath)
+    # return
             
 
     # return
@@ -472,17 +554,30 @@ def main(n_points: int = 5000, verbose: bool = True):
 
     #   # print(paths)
     #   # return
-    for year in range(2013, 2025):
-        for raster_type in ["dem", "dem_noncoreg", "dem_vertcoreg"]:
-            print(f"{raster_type}: {year}")
-            new_paths = adsvalbard.stacking.create_median_stack(years=year, n_threads=5 if year <= 2014 or year >= 2022 else 2, raster_type=raster_type, vertcoreg_label="austfonna", outlier_threshold=0.95, bounds_override=bounds if raster_type == "dem_vertcoreg" else None)
+    for label, bounds in vertcoreg_region_bounds.items():
+        print(label)
+        for year in range(2013, 2025):
+            for raster_type in ["dem", "dem_noncoreg", "dem_vertcoreg"]:
+                print(f"{raster_type}: {year}")
+                filt = [0.75, 0.95] if raster_type == "dem" else [0.75]
+
+                for threshold in filt:
+                    new_paths = adsvalbard.stacking.create_median_stack(
+                        years=year,
+                        n_threads=5 if year <= 2014 or year >= 2022 else 2,
+                        # n_threads=1,
+                        raster_type=raster_type,
+                        vertcoreg_label=label,
+                        outlier_threshold=threshold,
+                        bounds_override=bounds if raster_type == "dem_vertcoreg" else None)
 
             # print(new_paths)
             # return
 
     import adsvalbard.mosaicking
-    adsvalbard.mosaicking.mosaic_tile("006_021", redo=True)
-    adsvalbard.mosaicking.mosaic_all_tiles()
+    # adsvalbard.mosaicking.mosaic_tile("005_021", redo=True)
+    adsvalbard.mosaicking.mosaic_all_tiles(redo=True)
+    temporal_biascorr(redo=True)
 
     return
         
@@ -500,6 +595,380 @@ def main(n_points: int = 5000, verbose: bool = True):
         import adsvalbard.stacking
         adsvalbard.stacking.create_median_stack(years=year, n_threads=2, raster_type="dem_vertcoreg", bounds_override=bounds, vertcoreg_label="austfonna", nchunks_override=None)
         
+
+def temporal_biascorr_inner(chunks: gpd.GeoDataFrame, product_str: str, mosaic_dir: Path, redo: bool = False):
+    import rasterio as rio
+    import matplotlib.pyplot as plt
+    import scipy.ndimage
+    import scipy.spatial
+    import scipy.interpolate
+    import adsvalbard.rasters
+    import adsvalbard.mosaicking
+    import shapely.geometry
+
+    res = CONSTANTS.res
+
+    bounds = rio.coords.BoundingBox(*chunks.total_bounds)
+    with rio.open(mosaic_dir / "dem_2024_ocean.vrt") as raster:
+        window = rio.windows.from_bounds(*bounds, raster.transform)
+        print("Reading ocean")
+        ocean_2024 = raster.read(1, window=window, boundless=True) == 1
+
+        arr_bounds = rio.windows.bounds(window, raster.transform)
+        print("Constructing coords")
+        x_coords, y_coords = np.meshgrid(
+            np.linspace(arr_bounds[0] + raster.res[0] / 2, arr_bounds[2] - raster.res[0] / 2, ocean_2024.shape[1]), 
+            np.linspace(arr_bounds[1] + raster.res[1] / 2, arr_bounds[3] - raster.res[1] / 2, ocean_2024.shape[0])[::-1], 
+        )
+
+        window_transform = rio.windows.transform(window, raster.transform)
+    with rio.open(CONSTANTS.temp_dir / "stable_terrain.tif") as raster:
+        print("Reading stable")
+        window = rio.windows.from_bounds(*bounds, raster.transform)
+        stable_terrain = raster.read(1, window=window, boundless=True) == 1
+        
+    glaciers = (~ocean_2024) & (~stable_terrain)
+
+    with rio.open(mosaic_dir / "dem_2024_quality.vrt") as raster:
+        print("Reading quality")
+        window = rio.windows.from_bounds(*bounds, raster.transform)
+        missing_2024 = (raster.read(1, window=window, boundless=True) == 0)
+
+    print("Dilating")
+    patch = missing_2024 & glaciers
+    valid = (~missing_2024) & glaciers
+
+    edge_invalid = patch & scipy.ndimage.binary_dilation(valid, structure=np.ones((3, 3)))
+    edge_valid   = valid & scipy.ndimage.binary_dilation(patch, structure=np.ones((3, 3)))
+
+    print("Constructing coords")
+    pts = pd.DataFrame({"x_valid": x_coords[edge_valid], "y_valid": y_coords[edge_valid]})
+    invalid_pts = pd.DataFrame({"x_invalid": x_coords[edge_invalid], "y_invalid": y_coords[edge_invalid]})
+
+
+    tree = scipy.spatial.cKDTree(invalid_pts[["x_invalid", "y_invalid"]])
+
+    distances, indices = tree.query(pts[["x_valid", "y_valid"]], k=1)
+
+    distance_mask = distances < res * 2
+    pts = pts[distance_mask]
+
+    for axis in ["x", "y"]:
+        pts[f"{axis}_invalid"] = invalid_pts.loc[indices, f"{axis}_invalid"].values[distance_mask]
+        pts[axis] = pts[[f"{axis}_valid", f"{axis}_invalid"]].mean(axis="columns")
+    
+
+    # plt.scatter(pts["x"], pts["y"])
+    # plt.show()
+
+    # with rio.open(mosaic_dir / "trend_2019-2024_slope.vrt") as raster:
+    #     window = rio.windows.from_bounds(*bounds, raster.transform)
+
+    #     vals = (raster.read(1, masked=True, boundless=True, window=window).astype("float32") * raster.scales[0]).filled(np.nan)
+    #
+    #
+    #
+
+    print("Sampling NMAD")
+    smp = adsvalbard.rasters.sample_raster(
+        mosaic_dir / f"{product_str}_nmad.vrt",
+        gpd.points_from_xy(
+            x=np.r_[pts["x_valid"], pts["x_invalid"]],
+            y=np.r_[pts["y_valid"], pts["y_invalid"]],
+        )
+    )
+    print(pts.shape)
+    pts = pts[np.max((smp[:pts.shape[0]], smp[pts.shape[0]:]), axis=0) < 2.]
+
+    print("Sampling slope")
+    smp = adsvalbard.rasters.sample_raster(
+        mosaic_dir / f"{product_str}_slope.vrt",
+        gpd.points_from_xy(
+            x=np.r_[pts["x_valid"], pts["x_invalid"]],
+            y=np.r_[pts["y_valid"], pts["y_invalid"]],
+        )
+    )
+    print(pts.shape)
+    pts["val_valid"] = smp[:pts.shape[0]]
+    pts["val_invalid"] = smp[pts.shape[0]:]
+    pts["diff"] = pts["val_valid"] - pts["val_invalid"]
+    pts = pts[np.abs(pts["diff"]) < 0.6]
+    print(pts.shape)
+    # pts["diff"] = 1.
+    # pts = pts.dropna(subset="diff")
+
+    bin_size = 1000
+    xbins = np.arange(arr_bounds[0], arr_bounds[2] + bin_size, bin_size)
+    ybins = np.arange(arr_bounds[1], arr_bounds[3] + bin_size, bin_size)
+    pts["y_bin"] = np.digitize(pts["y"], ybins)
+    pts["x_bin"] = np.digitize(pts["x"], xbins)
+
+    grid = []
+    for _, subset in pts.groupby("x_bin"):
+        grouped = subset.select_dtypes(np.number).groupby("y_bin")
+        new = grouped.median()
+        new["count"] = grouped["diff"].count()
+        grid.append(new)
+
+    if len(grid) == 0:
+        raise ValueError(f"Grid empty.\nPts: {pts}")
+    grid = pd.concat(grid)
+
+    print("Interpolating diff")
+    model = scipy.interpolate.RBFInterpolator(grid[["x", "y"]], grid["diff"].astype("float32"), kernel="linear")
+
+
+    for _, chunk in chunks.iterrows():
+
+        if chunk["tbias_filepath"].is_file() and not redo:
+            print(f"Skipping {chunk['tbias_filepath'].name} as it already exists")
+            continue
+        print(chunk["chunk_id"])
+        chunk_bounds = chunk.geometry.bounds
+        window = rio.windows.from_bounds(*chunk_bounds, window_transform)
+        # for attr in ["col_off", "row_off", "height", "width"]:
+        #     setattr(window, attr, round(getattr(window, attr)))
+
+        # chunk_height = int((chunk_bounds[3] - chunk_bounds[1]) / res)
+        # chunk_width = int((chunk_bounds[2] - chunk_bounds[0]) / res)
+        x_coords, y_coords = np.meshgrid(
+            np.linspace(chunk_bounds[0] + res / 2, chunk_bounds[2] - res / 2, int(window.width)), 
+            np.linspace(chunk_bounds[1] + res / 2, chunk_bounds[3] - res / 2, int(window.height))[::-1], 
+        )
+
+        pred = np.zeros((int(window.height), int(window.width)), dtype="float32")
+
+
+        missing_2024_sub = patch[*window.toslices()]
+        # with rio.open(mosaic_dir / "dem_2024_quality.vrt") as raster:
+        #     print("Reading quality")
+        #     window = rio.windows.from_bounds(*chunk_bounds, raster.transform)
+        #     missing_2024_sub = (raster.read(1, window=window, boundless=True) == 0)
+        
+
+
+        pred[missing_2024_sub] = model(
+            np.column_stack(
+                (
+                    x_coords[missing_2024_sub].ravel(),
+                    y_coords[missing_2024_sub].ravel(),
+                )
+            )
+        )
+
+        with rio.open(chunk["slope_filepath"]) as raster:
+            raster_params = raster.meta
+            # trend = (raster.read(1, masked=True).astype("float32") * raster.scales[0]).filled(np.nan)
+        adsvalbard.mosaicking.write_formatted(
+            "slope_",  # This will trigger the same write profile as the slope rasters
+            chunk["tbias_filepath"],
+            pred,
+            params=raster_params,
+            redo=True,
+        )
+
+        
+        # continue
+        # plt.imshow(pred, cmap="RdBu", vmin=-0.5, vmax=0.5)
+        # fig = plt.figure()
+        # axes = fig.subplots(1, 3, sharex=True, sharey=True)
+        # axes[0].imshow(trend, cmap="RdBu", vmin=-1, vmax=1)
+        # axes[1].imshow(pred, cmap="RdBu", vmin=-1, vmax=1)
+        # axes[2].imshow(trend + pred, cmap="RdBu", vmin=-1, vmax=1)
+        # plt.show()
+
+    # xx, yy = np.meshgrid(xbins, ybins)
+    # # print(pred)
+    # fig = plt.figure()
+    # axes = fig.subplots(1, 2, sharex=True, sharey=True)
+    # axes[0].imshow(pred.reshape(xx.shape), vmin=-0.5, vmax=0.5, cmap="RdBu", extent=(0, missing_2024.shape[1], 0, missing_2024.shape[0]))
+    # axes[1].imshow(missing_2024)
+    # plt.show()
+
+    # plt.scatter(xx.ravel(), yy.ravel(), c=pred, cmap="RdBu", vmin=-.3, vmax=.3)
+    # corr = np.zeros(missing_2024.shape, dtype="float32")
+    # corr[missing_2024] = model(np.column_stack((x_coords[missing_2024], y_coords[missing_2024])))
+
+    # plt.imshow(corr, vmin=-1, vmax=1, cmap="RdBu")
+    # plt.colorbar()
+    # plt.show()
+
+    # fig = plt.figure()
+    # axes = fig.subplots(1, 3, sharex=True, sharey=True)
+    # axes[0].imshow(edge_invalid)
+    # axes[1].imshow(glaciers & missing_2024)
+    # axes[2].imshow(edge_valid)
+    # plt.show()
+    
+
+
+def create_summed_vrt(path1: Path, path2: Path, vrt_path: Path, band=1):
+    from osgeo import gdal
+    import os
+    gdal.UseExceptions()
+    ds1 = gdal.Open(path1)
+    ds2 = gdal.Open(path2)
+
+    if ds1 is None or ds2 is None:
+        raise RuntimeError("Could not open one or both input rasters.")
+
+    # Basic compatibility checks
+    if (ds1.RasterXSize != ds2.RasterXSize or
+        ds1.RasterYSize != ds2.RasterYSize):
+        raise ValueError("Raster dimensions do not match.")
+
+    if ds1.GetGeoTransform() != ds2.GetGeoTransform():
+        raise ValueError("GeoTransforms do not match.")
+
+    if ds1.GetProjection() != ds2.GetProjection():
+        raise ValueError("Projections do not match.")
+
+    b1 = ds1.GetRasterBand(band)
+    b2 = ds2.GetRasterBand(band)
+
+    scale1 = b1.GetScale()
+    offset1 = b1.GetOffset()
+    scale2 = b2.GetScale()
+    offset2 = b2.GetOffset()
+
+    # Normalize None values
+    scale1 = 1.0 if scale1 is None else scale1
+    scale2 = 1.0 if scale2 is None else scale2
+    offset1 = 0.0 if offset1 is None else offset1
+    offset2 = 0.0 if offset2 is None else offset2
+
+    if scale1 != scale2 or offset1 != offset2:
+        raise ValueError(
+            f"Input scale/offset differ: "
+            f"({scale1}, {offset1}) vs ({scale2}, {offset2})"
+        )
+
+    dtype_name = gdal.GetDataTypeName(b1.DataType)
+    nodata = b1.GetNoDataValue()
+
+    gt = ds1.GetGeoTransform()
+    proj = ds1.GetProjection()
+
+    nodata_xml = f"<NoDataValue>{nodata}</NoDataValue>" if nodata is not None else ""
+
+    vrt_xml = f'''<VRTDataset rasterXSize="{ds1.RasterXSize}" rasterYSize="{ds1.RasterYSize}">
+      <SRS>{proj}</SRS>
+      <GeoTransform>{", ".join(map(str, gt))}</GeoTransform>
+      <VRTRasterBand dataType="{dtype_name}" band="1" subClass="VRTDerivedRasterBand">
+        <ColorInterp>Gray</ColorInterp>
+        <PixelFunctionType>sum</PixelFunctionType>
+        {nodata_xml}
+        <SimpleSource>
+          <SourceFilename relativeToVRT="0">{os.path.abspath(path1)}</SourceFilename>
+          <SourceBand>{band}</SourceBand>
+        </SimpleSource>
+        <SimpleSource>
+          <SourceFilename relativeToVRT="0">{os.path.abspath(path2)}</SourceFilename>
+          <SourceBand>{band}</SourceBand>
+        </SimpleSource>
+      </VRTRasterBand>
+    </VRTDataset>
+    '''
+
+    with open(vrt_path, "w", encoding="utf-8") as f:
+        f.write(vrt_xml)
+
+    # Reopen in update mode and set output scale/offset metadata
+    out_ds = gdal.Open(vrt_path, gdal.GA_Update)
+    out_band = out_ds.GetRasterBand(1)
+    out_band.SetScale(scale1)
+    out_band.SetOffset(offset1)
+    out_band = None
+    out_ds = None
+
+    ds1 = None
+    ds2 = None
+
+    # A hack to fix the rounding that GDAL does above. It rounds to 17 decimals instead of 19 which make the VRTs
+    # incompatible...
+    with open(vrt_path) as infile:
+        vrt_content = infile.read()
+    vrt_content = vrt_content.replace(f"{scale1:.17f}", str(scale1))
+    with open(vrt_path, "w") as outfile:
+        outfile.write(vrt_content)
+
+    
+
+def temporal_biascorr(redo: bool = False):
+    import rasterio as rio
+    import matplotlib.pyplot as plt
+    import shapely.geometry
+    from osgeo import gdal
+    gdal.UseExceptions()
+
+    temp_dir = CONSTANTS.temp_dir.with_stem("temp.svalbard")
+    mosaic_dir = temp_dir / "filt/svalbard/mosaics_3584"
+    chunk_dir = mosaic_dir.with_stem(mosaic_dir.stem.replace("mosaics", "chunks"))
+
+    product_str = "trend_2019-2024"
+
+    all_chunks = gpd.read_file(temp_dir / "chunk_outlines.geojson")
+
+    fixes = [
+        (693517, 8823582,730963, 8930063), # E Austfonna
+        (659308,8894594,672531,8918846), # Duvebreen
+        (604638.5465,8861780.8961,634862.2933,8905775.9468), # Vestfonna
+        # (458480.3002,8771056.3376,465609.6921,8800975.4095), # Isachsenfonna
+        (458850.2849,8771734.1000,460606.0061,8789243.8596), # Isachsenfonna narrow
+    ]
+    
+    all_chunks["tbias_filepath"] = all_chunks["chunk_id"].apply(lambda chunk_id: chunk_dir / f"{chunk_id}/{chunk_id}_{product_str}_slope_tbias.tif")
+    all_chunks["slope_filepath"] = all_chunks["tbias_filepath"].apply(lambda fp: fp.with_name(fp.name.replace("_tbias.tif", ".tif")))
+    all_chunks["tcorr_filepath"] = all_chunks["tbias_filepath"].apply(lambda fp: fp.with_name(fp.name.replace("_tbias.tif", "_tcorr.vrt")))
+
+
+    for i, bounds in enumerate(fixes):
+        print(f"Fix {i+1} / {len(fixes)}: {rio.coords.BoundingBox(*bounds)}")
+        chunks = all_chunks[all_chunks.intersects(shapely.geometry.box(*bounds))]
+
+
+        if not chunks["tbias_filepath"].apply(lambda fp: fp.is_file()).all() or redo:
+            temporal_biascorr_inner(chunks=chunks, product_str=product_str, redo=redo, mosaic_dir=mosaic_dir)
+
+        for _, chunk in tqdm.tqdm(chunks.iterrows(), total=chunks.shape[0]):
+
+            # vrt_filepath: Path = chunk["filepath"].with_name(chunk["filepath"].name.replace("_tbias.tif", "_tcorr.vrt"))
+            # slope_filepath: Path = chunk["filepath"].with_name(chunk["filepath"].name.replace("_tbias.tif", ".tif"))
+
+            with rio.open(chunk["slope_filepath"]) as raster:
+                if raster.dtypes[0] == "float32":
+                    import adsvalbard.mosaicking
+                    adsvalbard.mosaicking.mosaic_tile(chunk_nr=chunk["chunk_id"].replace("chunk_", ""), redo=True)
+
+            # print(chunk["slope_filepath"])
+            create_summed_vrt(chunk["slope_filepath"], chunk["tbias_filepath"], chunk["tcorr_filepath"])
+
+    in_filepaths = []
+    for _, chunk in all_chunks.iterrows():
+        if not chunk["slope_filepath"].is_file():
+            continue
+
+        # There are some poorly formatted tiles left that should be removed
+        with rio.open(chunk["slope_filepath"]) as raster:
+            dtype = raster.dtypes[0]
+        if dtype == "float32":
+            import os
+            os.remove(chunk["slope_filepath"])
+            continue
+        if chunk["tcorr_filepath"].is_file():
+            in_filepaths.append(str(chunk["tcorr_filepath"]))
+        else:
+            in_filepaths.append(str(chunk["slope_filepath"]))
+
+    for filepath in in_filepaths:
+        with rio.open(filepath) as raster:
+            print(filepath.split("/")[-1], raster.scales)
+
+    gdal.BuildVRT(
+        mosaic_dir / f"{product_str}_slope_tcorr.vrt",
+        in_filepaths,
+    )
+   
 
 
 if __name__ == "__main__":

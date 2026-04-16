@@ -873,6 +873,21 @@ def process_chunk(filepath: Path, input_filepaths: dict[Path, threading.Lock], o
 def process_chunk_wrapper(args):
     return process_chunk(**args)
 
+
+def get_chunk_filepath(i: int,output_vrt_path: Path, region: str = "svalbard", chunksize: int = 512 * 7):
+    import rasterio as rio
+    res = CONSTANTS.res
+    bounds_dict = CONSTANTS.regions[region]
+    bounds = rio.coords.BoundingBox(**bounds_dict)
+    shape = adsvalbard.utilities.shape_from_bounds_res(bounds, [res] * 2)
+    n_col_chunks = int(np.ceil(shape[1] / chunksize))
+    n_row_chunks = int(np.ceil(shape[0] / chunksize))
+    n_zero_pads = int(np.ceil(np.log10(max(n_col_chunks, n_row_chunks))) + 1)
+    col = i % n_col_chunks
+    row = int((i - col) / n_col_chunks) 
+    
+    return output_vrt_path.parent / f"{output_vrt_path.stem}_chunks_{chunksize}/chunk_{str(row).zfill(n_zero_pads)}_{str(col).zfill(n_zero_pads)}.tif"
+
 def create_median_stack(
     years: int | list[int] | None = 2021,
     n_threads: int | None = None,
@@ -925,6 +940,7 @@ def create_median_stack(
         raise TypeError(f"{years=} has unknown type: {type(years)=}")
 
     filt_str = f"filt_{str(int(outlier_threshold * 100)).zfill(3)}"
+    bad_titles = Path("temp.svalbard/bad_dems.txt").read_text().splitlines()
 
     vertical_shifts = None
 
@@ -940,6 +956,7 @@ def create_median_stack(
         v_clip = 1500
         pattern = "*_dem_coreg.tif"
         dirs = [raster_dir]
+        bad_titles = list(set(bad_titles + Path("temp.svalbard/bad_dems_dem.txt").read_text().splitlines()))
     elif raster_type == "dem_noncoreg":
         output_path = temp_dir / f"medians/{region}/dem_noncoreg/median_dem{ext}.vrt"
         v_clip = 1500
@@ -961,7 +978,10 @@ def create_median_stack(
         else:
             vertcoreg_label = ""
         vertical_shifts = pd.read_csv(temp_dir / f"vertcoreg_results/vertcoreg_results_{years[0]}{vertcoreg_label}.csv", index_col=0).squeeze()
-        vertical_shifts = vertical_shifts[vertical_shifts["n_comparisons"] > 30]
+        vertical_shifts = vertical_shifts[vertical_shifts["n_comparisons"] > 60]
+
+        # print("SKIPPING REMOVAL OF EXTRA VERTCOREG BAD STRIPS")
+        bad_titles = list(set(bad_titles + Path("temp.svalbard/bad_dems_dem_vertcoreg.txt").read_text().splitlines()))
         
 
     else:
@@ -969,6 +989,10 @@ def create_median_stack(
 
 
 
+    strips = adsvalbard.arcticdem.get_strips("svalbard")
+    strips = strips[pd.to_datetime(strips["datetime"]).dt.year.isin(years)]
+
+    strips = strips[~strips["title"].isin(bad_titles)]
 
     res = CONSTANTS.res
     bounds_dict = CONSTANTS.regions[region]
@@ -994,11 +1018,19 @@ def create_median_stack(
         col = i % n_col_chunks
         row = int((i - col) / n_col_chunks) 
 
+        chunk_nr = f"chunk_{str(row).zfill(n_zero_pads)}_{str(col).zfill(n_zero_pads)}"
+
+        # These chunks don't play well with the intersection filter
+        if chunk_nr not in ["chunk_008_021", "chunk_018_021", "chunk_000_027", "chunk_001_028"]:
+            # Filter out completely empty chunks
+            if not strips.intersects(shapely.geometry.box(*chunk_bounds)).any():
+                continue
+
         shape = adsvalbard.utilities.shape_from_bounds_res(chunk_bounds, [res] * 2)
 
         chunks.append(
             {
-                "filepath": output_path.parent / f"{output_path.stem}_chunks_{block_size[0]}/chunk_{str(row).zfill(n_zero_pads)}_{str(col).zfill(n_zero_pads)}.tif",
+                "filepath": output_path.parent / f"{output_path.stem}_chunks_{block_size[0]}/{chunk_nr}.tif",
                 "bounds": chunk_bounds,
                 "input_filepaths": {},
             }
@@ -1039,11 +1071,6 @@ def create_median_stack(
         chunks_to_process.append(chunk)
     # chunks_to_process.sort(key=sort_chunk)
 
-    strips = adsvalbard.arcticdem.get_strips("svalbard")
-    strips = strips[pd.to_datetime(strips["datetime"]).dt.year.isin(years)]
-
-    bad_titles = Path("temp.svalbard/bad_dems.txt").read_text().splitlines()
-    strips = strips[~strips["title"].isin(bad_titles)]
 
     if len(chunks_to_process) > 0:
         chunks_to_process[-1]["filepath"].parent.mkdir(exist_ok=True, parents=True)
@@ -1148,6 +1175,110 @@ def create_median_stack(
 
     return [chunk["filepath"] for chunk in chunks]
 
+
+def make_chunk_polygons():
+    import rasterio as rio
+    import adsvalbard.rasters
+    import shapely.geometry
+    
+    temp_dir = CONSTANTS.temp_dir.with_stem("temp.svalbard")
+    res = CONSTANTS.res
+    bounds = rio.coords.BoundingBox(**CONSTANTS.regions["svalbard"])
+    chunksize = 512 * 7
+
+    chunks = []
+    for i, chunk_bounds in enumerate(adsvalbard.rasters.generate_raster_chunks(bounds=bounds, res=res, chunksize=chunksize)):
+        chunk_id = get_chunk_filepath(i, Path("/")).stem
+
+        chunks.append(
+            {
+                "chunk_id": chunk_id,
+                "geometry": shapely.geometry.box(*chunk_bounds),
+            }
+        )
+
+
+    gpd.GeoDataFrame(pd.DataFrame.from_records(chunks), geometry="geometry", crs=CONSTANTS.crs_epsg).to_file(temp_dir / "chunk_outlines.geojson")
+
+
+def remove_bad_dem_chunks():
+    import os
+    import rasterio as rio
+    import shapely.geometry
+    import adsvalbard.arcticdem
+    import adsvalbard.rasters
+    
+    strips = adsvalbard.arcticdem.get_strips("svalbard")
+    temp_dir = CONSTANTS.temp_dir.with_stem("temp.svalbard")
+    bad_titles = Path("temp.svalbard/bad_dems.txt").read_text().splitlines()
+    bad_coreg_titles = (temp_dir / "bad_dems_dem.txt").read_text().splitlines()
+    bad_vertcoreg_titles = (temp_dir / "bad_dems_dem_vertcoreg.txt").read_text().splitlines()
+
+    bad_titles = {
+        "dem_noncoreg": bad_titles,
+        "dem_vertcoreg": list(set(bad_titles + bad_vertcoreg_titles)),
+        "dem": bad_coreg_titles,
+    }
+
+    # Override the above (2026-03-17)
+    bad_titles["dem_vertcoreg"] = bad_vertcoreg_titles
+
+    strips["datetime"] = pd.to_datetime(strips["datetime"])
+    strips["year"] = strips["datetime"].dt.year
+
+    res = CONSTANTS.res
+    bounds = rio.coords.BoundingBox(**CONSTANTS.regions["svalbard"])
+
+    chunksize = 512 * 7
+
+    filepaths_to_remove = []
+    print("Looking for paths")
+    for year in range(2013, 2025):
+        # Extract every year's strip
+        year_strips = strips[strips["year"] == year]
+        # Loop over all product types
+        for product in ["dem", "dem_noncoreg", "dem_vertcoreg"]:
+            # if product != "dem_vertcoreg":
+            #     continue
+            # Extract only the bad strips for this year and product
+            bad_strips = year_strips[year_strips["title"].isin(bad_titles[product])]
+            # Skip if there are no bad strips
+            if bad_strips.shape[0] == 0:
+                continue
+
+            # Loop through all chunks
+            for i, chunk_bounds in enumerate(adsvalbard.rasters.generate_raster_chunks(bounds=bounds, res=res, chunksize=chunksize)):
+                # Extract only the strips that may be involved in the chunk
+                overlapping_strips = bad_strips[bad_strips.intersects(shapely.geometry.box(*chunk_bounds))]
+                # Skip if there are no bad and overlapping strips
+                if overlapping_strips.shape[0] == 0:
+                    continue
+            
+                # Plan to remove both the filtered versions
+                thresholds = ["_filt_075", "_filt_095"] if product == "dem" else [""]
+                for threshold in thresholds:
+
+                    # This will be something like path/to/chunk_000_002.tif
+                    base_filepath = get_chunk_filepath(i, temp_dir / f"medians/svalbard/{product}/median{threshold}_dem_{year}")
+
+                    # Try to find all e.g. path/to/chunk_000_002* files (e.g. _nmad.tif, _count.tif etc)
+                    for subpath in base_filepath.parent.glob(f"{base_filepath.stem}*"):
+                        filepaths_to_remove.append(subpath)
+
+    n_to_remove = len(filepaths_to_remove)
+
+    if n_to_remove == 0:
+        print("No paths to remove")
+        return
+
+    yesno = input(f"Remove {n_to_remove} filepaths? y/[N]")
+
+    if yesno.strip() != "y":
+        print("Stopping")
+        return
+
+    for filepath in tqdm.tqdm(filepaths_to_remove, desc="Removing"):
+        os.remove(filepath)
 
 
 def hypsometric(bin_size: int = 5):
