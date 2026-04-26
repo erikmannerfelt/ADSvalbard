@@ -1186,10 +1186,14 @@ def make_chunk_polygons():
     bounds = rio.coords.BoundingBox(**CONSTANTS.regions["svalbard"])
     chunksize = 512 * 7
 
+    # Exclude Kong Karls Land and Hopen
+    exclusion_box = shapely.geometry.box(744600, 8455000, 904000,8811000)
     chunks = []
     for i, chunk_bounds in enumerate(adsvalbard.rasters.generate_raster_chunks(bounds=bounds, res=res, chunksize=chunksize)):
         chunk_id = get_chunk_filepath(i, Path("/")).stem
 
+        if exclusion_box.intersects(shapely.geometry.box(*chunk_bounds)):
+            continue
         chunks.append(
             {
                 "chunk_id": chunk_id,
@@ -1197,8 +1201,10 @@ def make_chunk_polygons():
             }
         )
 
+    gdf = gpd.GeoDataFrame(pd.DataFrame.from_records(chunks), geometry="geometry", crs=CONSTANTS.crs_epsg)
 
-    gpd.GeoDataFrame(pd.DataFrame.from_records(chunks), geometry="geometry", crs=CONSTANTS.crs_epsg).to_file(temp_dir / "chunk_outlines.geojson")
+    gdf.to_file(temp_dir / "chunk_outlines.geojson")
+    return gdf
 
 
 def remove_bad_dem_chunks():

@@ -661,6 +661,8 @@ def get_mosaic_filenames(chunk_nr: str, chunksize: int = 512 * 7) -> dict[str, P
             out_paths["accel"] = fp.with_stem(fp.stem + "_accel")
             out_paths["se_accel"] = fp.with_stem(fp.stem + "_accel_se")
 
+    out_paths["quality_mode"] = out_dir / f"chunk_{chunk_nr}_quality_mode.tif"
+
     return out_paths
 
 def read_coastline(year: str, meta: dict[str, object]) -> np.ndarray:
@@ -720,6 +722,10 @@ def mosaic_tile(chunk_nr: str = "007_004", chunksize: int = 512 * 7, verbose: bo
     flags = []
     oceans = []
     weights = compute_weight_field(meta=params, bad_regions=bad_regions, R=2000)
+
+    # Exception for Storøya (use the normal coreg results)
+    if chunk_nr == "003_022":
+        weights = None
 
     # import matplotlib.pyplot as plt
     # plt.imshow(weights)
@@ -796,6 +802,10 @@ def mosaic_tile(chunk_nr: str = "007_004", chunksize: int = 512 * 7, verbose: bo
     flags = np.hstack(flags)
     oceans = np.hstack(oceans)
 
+    quality_counts = np.stack([(flags == v).sum(axis=1) for v in range(1, 5)], axis=1)
+    quality_mode = (quality_counts.argmax(axis=1) + 1).astype("uint8")   # values 1..4
+    quality_mode[quality_counts.sum(axis=1) == 0] = 0  # rows that were all zeros
+
     # These points are ocean in every DEM. Should be skipped
     only_ocean = np.count_nonzero(~oceans, axis=1) < 2
     # only_ocean = oceans.all(axis=-1)
@@ -806,6 +816,7 @@ def mosaic_tile(chunk_nr: str = "007_004", chunksize: int = 512 * 7, verbose: bo
     # Apply the yearly ocean mask
     dems[oceans[~only_ocean]] = 0.
     flags = flags[~only_ocean]
+    quality_mode = quality_mode[~only_ocean]
 
     # enough_pts = np.count_nonzero(np.isfinite(dems), axis=-1) >= 2
     # dems = dems[enough_pts]
@@ -813,7 +824,7 @@ def mosaic_tile(chunk_nr: str = "007_004", chunksize: int = 512 * 7, verbose: bo
 
     del oceans
     
-    data = {}
+    data = {"quality_mode": quality_mode}
 
     if verbose:
         print("Fitting trend")
@@ -911,6 +922,9 @@ def mosaic_all_tiles(chunksize: int = 512 * 7, n_workers: int | None = 8, redo =
 
     import adsvalbard.stacking
 
+    chunk_outlines = adsvalbard.stacking.make_chunk_polygons()
+    chunk_outlines["chunk_nr"] = chunk_outlines["chunk_id"].str.replace("chunk_", "")
+
     # Hacky way to get only the chunks that exist in all years
     chunk_nrs = []
     for year in range(2013, 2025):
@@ -934,6 +948,9 @@ def mosaic_all_tiles(chunksize: int = 512 * 7, n_workers: int | None = 8, redo =
     call_args = []
     all_out_paths = []
     for chunk_nr in chunk_nrs:
+
+        if chunk_nr not in chunk_outlines["chunk_nr"].values:
+            continue
 
         parts = chunk_nr.split("_")
 
@@ -991,7 +1008,7 @@ def mosaic_all_tiles(chunksize: int = 512 * 7, n_workers: int | None = 8, redo =
     for key in per_key_filepaths:
 
         name = key
-        if key.startswith("20"):
+        if key.startswith("20") or key == "quality_mode":
             name = f"dem_{key}"
         elif "accel" in key:
             name = f"trend_{periods['full']}_{'_'.join(key.split('_')[::-1])}"

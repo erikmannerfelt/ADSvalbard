@@ -660,7 +660,7 @@ def sample_variogram_points_stable_multires(
     # -------------------------
     # Greedy additions
     # -------------------------
-    with tqdm.tqdm(total=n_points) as progress_bar:
+    with tqdm.tqdm(total=n_points, desc="Sampling points for vgm.") as progress_bar:
         while k < n_points:
             total_pairs_if_added = k * (k + 1) / 2
             target = total_pairs_if_added / n_bins
@@ -742,13 +742,13 @@ def sample_variogram_points_stable_multires(
 def main(verbose=True, n_points=10000, redo=False, random_seed=1):
     import adsvalbard.rasters
     # bbox = (469120,8554890,583640,8835780)
-    bbox = (408989.5978,8531849.9630,666111.5882,8867476.9870)
-    # bbox = (396000, 8479000, 727000, 8954000) # Spitsbergen and Nordaustlandet
-    bins = 10 ** np.linspace(np.log10(30), np.log10(150000), 50) 
+    # bbox = (408989.5978,8531849.9630,666111.5882,8867476.9870)
+    bbox = (396000, 8479000, 727000, 8954000) # Spitsbergen and Nordaustlandet
+    bins = 10 ** np.linspace(np.log10(30), np.log10(2.5e5), 50) 
     
     cache_path = Path("temp.svalbard/uncertainty/vgm_sample_pts.arrow")
     var_col = "trend_2013-2024_slope"
-    err_col = var_col.replace("_slope", "_se")
+    err_col = var_col.replace("_slope", "_slope_err")
     # err_col = var_col + "_se"
 
     if cache_path.is_file() and not redo:
@@ -756,6 +756,7 @@ def main(verbose=True, n_points=10000, redo=False, random_seed=1):
     else:
         start_time = time.time()
         all_pts = []
+        # Running multiple times increases mid- to long-range sample counts
         for i in range(3):
             pts_xy, hist = sample_variogram_points_stable_multires(
                 stable_path="temp/stable_terrain.tif",
@@ -789,11 +790,10 @@ def main(verbose=True, n_points=10000, redo=False, random_seed=1):
         pts[err_col] = adsvalbard.rasters.sample_raster(f"temp.svalbard/filt/svalbard/mosaics_3584/{err_col}.vrt", geometry=pts["geometry"])
         pts.to_feather(cache_path)
 
-    pts = pts[pts[err_col] < (4 * pts[err_col].median())]
-    pts = pts[np.abs(pts[var_col]) < (4 * np.abs(pts[var_col]).median())]
-
+    original_var = pts[var_col].var()
+    pts = pts[pts[err_col] < (3 * pts[err_col].median())]
+    pts = pts[np.abs(pts[var_col]) < (3 * np.abs(pts[var_col]).median())]
     scaled_col = var_col + "_scaled"
-
     pts[scaled_col] = (1e-3 + pts[err_col].mean()) * pts[var_col] / (pts[err_col] + 1e-3)
 
     
@@ -866,11 +866,14 @@ def main(verbose=True, n_points=10000, redo=False, random_seed=1):
         n_jobs=1,
         random_state=random_seed,
     )
+
+    exp_scale = original_var / pts[scaled_col].var()
+    variogram[["exp", "err_exp"]] *= exp_scale
     # Remove erroneous points that are far beyond the full variance of the data
-    variogram = variogram[variogram["exp"] < pts[scaled_col].var() * 1.15]
+    # variogram = variogram[variogram["exp"] < pts[scaled_col].var() * 1.15]
     print(variogram)
 
-    vgm_model, params = xdem.spatialstats.fit_sum_model_variogram(["Sph", "Sph", "Sph"], variogram)
+    vgm_model, params = xdem.spatialstats.fit_sum_model_variogram(["Sph", "Gaussian"], variogram, p0=[1e2, 1e-4, 1e4, 1e-4])
 
     areas = 10 ** np.linspace(0, np.log10(35000e6), 1000)
     neff = []
@@ -886,7 +889,7 @@ def main(verbose=True, n_points=10000, redo=False, random_seed=1):
     axes[1].plot(variogram.index, vgm_model(variogram.index), label="Variogram model", color="black")
     axes[1].errorbar(variogram.index, variogram["exp"], yerr=variogram["err_exp"], fmt="x", label="Empirical variogram", color="royalblue")
 
-    axes[1].set_ylim(0, variogram["exp"].max() * 1.3)
+    axes[1].set_ylim(0, original_var * 1.32)
     for r in params["range"].values:
         axes[1].vlines(r, *axes[1].get_ylim(), color="gray", linestyles="--")
         

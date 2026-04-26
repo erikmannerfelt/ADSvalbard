@@ -92,6 +92,7 @@
 { "type": "Feature", "properties": { "id": "087" }, "geometry": { "type": "Point", "coordinates": [ 716971.601669539231807, 8882633.932426923885942 ] } },
 { "type": "Feature", "properties": { "id": "088" }, "geometry": { "type": "Point", "coordinates": [ 698073.680331491981633, 8910699.834295153617859 ] } },
 { "type": "Feature", "properties": { "id": "089" }, "geometry": { "type": "Point", "coordinates": [ 617279.848408762016334, 8837853.726299637928605 ] } },
-{ "type": "Feature", "properties": { "id": "090" }, "geometry": { "type": "Point", "coordinates": [ 667177.493710691458546, 8876715.455974843353033 ] } }
+{ "type": "Feature", "properties": { "id": "090" }, "geometry": { "type": "Point", "coordinates": [ 667177.493710691458546, 8876715.455974843353033 ] } },
+{ "type": "Feature", "properties": { "id": "091" }, "geometry": { "type": "Point", "coordinates": [ 612417.816151326871477, 8897678.996843326836824 ] } }
 ]
 }

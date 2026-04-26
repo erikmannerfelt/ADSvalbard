@@ -1,4 +1,5 @@
 from adsvalbard import outlines, vert_coreg
+from adsvalbard.constants import CONSTANTS
 import rasterio as rio
 import pandas as pd
 import geopandas as gpd
@@ -6,6 +7,7 @@ import numpy as np
 import shutil
 import tqdm
 import tqdm.contrib.concurrent
+import warnings
 
 from pathlib import Path
 import matplotlib.pyplot as plt
@@ -25,7 +27,7 @@ def var_name_to_se_name(var_col: str) -> str:
     return var_col.replace("_slope", "_se").replace("_accel", "_accel_se") 
 
 
-def sample_points(n_points: int = 25000, redo: bool = False):
+def sample_points(n_points: int = int(1e6), redo: bool = False):
     temp_dir = get_temp_dir()
     out_path = temp_dir / f"sampled_pts_{n_points}.arrow"
 
@@ -38,13 +40,14 @@ def sample_points(n_points: int = 25000, redo: bool = False):
         "trend_2013-2018_slope",
         "trend_2019-2024_slope",
         "trend_2013-2024_accel",
+        "dem_quality_mode",
     ]
     keys = var_keys.copy()
     for key in keys.copy():
         keys.append(var_name_to_se_name(key))
 
     files = {key: Path(f"{base_filepath}{key}.vrt") for key in keys}
-    files["terr_slope_of_slope"] = Path("temp/npi_slope_of_slope.tif")
+    files["terr_curvature"] = Path("temp/npi_curvature.vrt")
     files["terr_slope"] = Path("temp/npi_slope.tif")
 
     with rio.open(files[var_keys[0]]) as raster:
@@ -71,6 +74,9 @@ def sample_points(n_points: int = 25000, redo: bool = False):
     # Read stable terrain mask
     points["stable"] = adsvalbard.rasters.sample_raster(Path("temp/stable_terrain.tif"), points.geometry) == 1
 
+    points["easting"] = points.geometry.x
+    points["northing"] = points.geometry.y
+
     out_path.parent.mkdir(exist_ok=True)
     points.dropna().to_feather(out_path)
 
@@ -78,9 +84,18 @@ def sample_points(n_points: int = 25000, redo: bool = False):
 
 
 
-def make_err_function(points: gpd.GeoDataFrame, pred_col: str, var_cols: list[str] = ["terr_slope", "terr_slope_of_slope"]):
-    bins = {col: np.unique(np.percentile(points[col], np.arange(0, 100, 10))) for col in var_cols}
+def make_err_function(points: gpd.GeoDataFrame, pred_col: str, var_cols: list[str]):
 
+    bins = {}
+    for col in var_cols:
+        if col == "dem_quality_mode":
+            bins["dem_quality_mode"] = [0, 3, 5]
+        elif col in ["easting", "northing"]:
+            bins[col] = np.unique(np.percentile(points[col], np.linspace(0, 100, 5)))
+        else:
+            bins[col] = np.unique(np.percentile(points[col], np.linspace(0, 100, 10)))
+
+    # print(np.unique(points["dem_quality_mode"].astype(int), return_counts=True))
     import xdem
     df = xdem.spatialstats.nd_binning(
         values=points.loc[points["stable"], pred_col].values,
@@ -114,7 +129,7 @@ def apply_function(chunk_dir: Path, func, pred_col: str, var_cols: list[str], re
     # chunk_dir = get_chunks_dir() / f"chunk_{chunk_nr}"
     chunk_nr = chunk_dir.stem.replace("chunk_", "")
 
-    out_path = temp_dir / f"{chunk_dir.parts[-2]}/chunk_{chunk_nr}_{pred_col}_err_sigma1.tif"
+    out_path = temp_dir / f"{chunk_dir.parts[-2]}/chunk_{chunk_nr}_{pred_col}_err.tif"
 
     if out_path.is_file() and not redo:
         return out_path
@@ -128,25 +143,38 @@ def apply_function(chunk_dir: Path, func, pred_col: str, var_cols: list[str], re
 
     with rio.open(chunk_dir / f"chunk_{chunk_nr}_{se_col}.tif") as raster:
         err = raster.read(1, masked=True)
-        err = (err * raster.scales[0] + raster.offsets[0]).filled(np.nan).ravel()
+        err = (err.astype("float32") * raster.scales[0] + raster.offsets[0]).filled(np.nan).ravel()
         # err = raster.read(1, masked=True).filled(np.nan).ravel()
         bounds = raster.bounds
         meta = raster.meta
 
+        eastings, northings = np.meshgrid(
+            np.linspace(bounds[0] + raster.res[0] / 2, bounds[2] - raster.res[0] / 2, raster.width), 
+            np.linspace(bounds[1] + raster.res[1] / 2, bounds[3] - raster.res[1] / 2, raster.height)[::-1], 
+        )
+
+        
+
 
     paths=  {
         "terr_slope": Path("temp/npi_slope.tif"),
+        "terr_curvature": Path("temp/npi_curvature.vrt"),
         "terr_slope_of_slope": Path("temp/npi_slope_of_slope.tif")
     }
 
-    arrs = pd.DataFrame(index=np.arange(err.size))
+    arrs = pd.DataFrame(index=np.arange(raster.height * raster.width))
 
     for key in var_cols:
-        with rio.open(paths[key]) as raster:
-            window = rio.windows.from_bounds(*bounds, raster.transform)
-            # print((meta["height"], meta["width"]), window)
-            arr = raster.read(1, masked=True, window=window, boundless=True)
-            arrs[key] = (arr * raster.scales[0] + raster.offsets[0]).filled(np.nan).ravel()
+        if key == "easting":
+            arrs[key] = eastings.ravel()
+        elif key == "northing":
+            arrs[key] = northings.ravel()
+        else:
+            with rio.open(paths[key]) as raster:
+                window = rio.windows.from_bounds(*bounds, raster.transform)
+                # print((meta["height"], meta["width"]), window)
+                arr = raster.read(1, masked=True, window=window, boundless=True)
+                arrs[key] = (arr * raster.scales[0] + raster.offsets[0]).filled(np.nan).ravel()
 
     err = np.hypot(func(arrs), err)
 
@@ -334,6 +362,7 @@ def check_bad_pts(prefix: str = "", gui: bool = False):
 			"087": [519, 557],
 			"089": [162, 166],
 			"090": [771, 785],
+			# "091": [518, 528],
         },
         "dem": {  # This means co-registered DEMs
 			"011": [376, 381],
@@ -481,7 +510,7 @@ def check_bad_pts(prefix: str = "", gui: bool = False):
 
     if len(prefix) > 0:
         prefix = f"_{prefix}"
-    Path(f"temp.svalbard/bad_dems{prefix}.txt").write_text("\n".join(bad_titles))
+    Path(f"temp.svalbard/bad_dems{prefix}.txt").write_text("\n".join(sorted(bad_titles)))
 
     if gui:
         import matplotlib.pyplot as plt
@@ -529,6 +558,105 @@ def check_bad_pts(prefix: str = "", gui: bool = False):
         plt.show()
     
 
+def _pad_bounds(bounds: rio.coords.BoundingBox, pad: float) -> rio.coords.BoundingBox:
+    return rio.coords.BoundingBox(
+        left=bounds.left - pad,
+        bottom=bounds.bottom - pad,
+        right=bounds.right + pad,
+        top=bounds.top + pad,
+    )
+
+
+def _window_from_bounds(bounds: rio.coords.BoundingBox, transform) -> rio.windows.Window:
+    return rio.windows.from_bounds(
+        bounds.left, bounds.bottom, bounds.right, bounds.top, transform=transform
+    ).round_offsets().round_lengths()
+
+
+def calculate_max_abs_curvature_chunk(
+    dem_path: Path,
+    out_path: Path,
+    bounds: rio.coords.BoundingBox,
+    res: float,
+) -> Path:
+    pad = res  # 1-pixel halo
+
+    if out_path.is_file():
+        return out_path
+
+    import xdem
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with rio.open(dem_path) as src:
+        work_bounds = _pad_bounds(bounds, pad)
+        work_window = rio.windows.from_bounds(*work_bounds, src.transform).round_offsets().round_lengths()
+        final_window = rio.windows.from_bounds(*bounds, src.transform).round_offsets().round_lengths()
+
+        dem = src.read(1, window=work_window, boundless=True, masked=True).filled(np.nan)
+
+        planc, profc = xdem.terrain.get_terrain_attribute(
+            dem=dem,
+            attribute=["planform_curvature", "profile_curvature"],
+            resolution=res,
+        )
+        maxc = np.max([np.abs(planc), np.abs(profc)], axis=0)
+
+        row0 = int(final_window.row_off - work_window.row_off)
+        col0 = int(final_window.col_off - work_window.col_off)
+        height = int(final_window.height)
+        width = int(final_window.width)
+
+        maxc = maxc[row0 : row0 + height, col0 : col0 + width]
+
+        profile = src.profile.copy()
+        profile.update(
+            driver="GTiff",
+            height=height,
+            width=width,
+            count=1,
+            dtype="float32",
+            nodata=-9999,
+            transform=rio.windows.transform(final_window, src.transform),
+            compress="deflate",
+            predictor=3,
+            zlevel=9
+        )
+
+        temp_path = out_path.with_suffix(".tif.tmp")
+        with rio.open(temp_path, "w", **profile) as dst:
+            dst.write(np.nan_to_num(maxc, nan=-9999.), 1)
+        shutil.move(temp_path, out_path)
+
+    return out_path
+
+
+def calculate_all_max_abs_curvature_chunks() -> Path:
+    import adsvalbard.stacking
+    from osgeo import gdal
+
+    mosaic_path = Path("temp/npi_curvature.vrt")
+    res = CONSTANTS.res
+    dem_path = Path("temp/npi_mosaic.vrt")
+    chunk_gdf = adsvalbard.stacking.make_chunk_polygons()
+    out_paths: list[Path] = []
+
+    for row in tqdm.tqdm(chunk_gdf.itertuples(index=False), total=chunk_gdf.shape[0]):
+        bounds = rio.coords.BoundingBox(*row.geometry.bounds)
+        out_path = Path(f"temp/curvature/{row.chunk_id}_curvature.tif")
+        calculate_max_abs_curvature_chunk(
+            dem_path=dem_path,
+            out_path=mosaic_path,
+            bounds=bounds,
+            res=res,
+        )
+        out_paths.append(out_path)
+
+    gdal.UseExceptions()
+    gdal.BuildVRT(str(mosaic_path), list(map(str, out_paths)))
+
+    return mosaic_path
+
+
 def main(redo: bool = False):
     from osgeo import gdal
     gdal.UseExceptions()
@@ -536,7 +664,7 @@ def main(redo: bool = False):
     temp_dir = get_temp_dir()
     points = sample_points()
 
-    var_cols = ["terr_slope", "terr_slope_of_slope"]
+    var_cols = ["terr_slope", "terr_curvature", "easting", "northing"]#, "dem_quality_mode"]
     pred_cols = [
         "trend_2013-2024_slope",
         "trend_2013-2018_slope",
@@ -557,14 +685,14 @@ def main(redo: bool = False):
         for chunk_dir in tqdm.tqdm(chunk_dirs, desc=f"Applying err functions for {pred_col}"):
             try:
                 out_path = apply_function(chunk_dir, func=func, pred_col=pred_col, var_cols=var_cols, redo=redo)
-                out_paths.append(str(out_path))
+                out_paths.append(str(out_path.absolute()))
             except KeyboardInterrupt:
                 raise
             except Exception as e:
                 print(f"Error on {chunk_dir}: {e}")
 
         gdal.BuildVRT(
-            str(temp_dir / f"{pred_col}_err_sigma1.vrt"),
+            str(Path("temp.svalbard/filt/svalbard/mosaics_3584") / f"{pred_col}_err.vrt"),
             out_paths,
         )
 
@@ -575,6 +703,51 @@ def main(redo: bool = False):
     plt.scatter(points.geometry.x, points.geometry.y, c=points["dh_err_pred"], vmin=vmin, vmax=vmax)
     plt.colorbar()
     plt.show()
+
+
+def patch_method_uncertainty():
+
+    import xdem
+    with rio.open("temp/stable_terrain.tif", overview_level=2) as raster:
+        bounds = raster.bounds
+        stable = raster.read(1, masked=True).filled(0) == 1
+
+    for key in ["trend_2013-2018_slope", "trend_2019-2024_slope", "trend_2013-2024_slope"]:
+        trend_path = Path(f"temp.svalbard/filt/svalbard/mosaics_3584/out/{key}.tif")
+
+
+        scale = rio.open(trend_path).scales[0]
+        with rio.open(trend_path, overview_level=2) as raster:
+            window = rio.windows.from_bounds(*bounds, raster.transform)
+
+            dhdt = (raster.read(1, masked=True, boundless=True, window=window).astype("float32") * scale).filled(np.nan)
+
+        dhdt = np.where(stable, dhdt, np.nan)
+
+        # import matplotlib.pyplot as plt
+        # plt.imshow(dhdt, vmin=-.1, vmax=.1, cmap="RdBu")
+        # plt.show()
+
+        areas = 10 ** np.linspace(np.log10(raster.res[0] ** 2), np.log10(5e8), 15)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            patches = xdem.spatialstats.patches_method(dhdt, areas=areas, gsd=raster.res[0], vectorized=True).dropna(how="any")
+
+        patches = patches.drop_duplicates(subset=["exact_areas"])
+        for col in ["nb_indep_patches", "exact_areas", "areas"]:
+            patches[col] = patches[col].round().astype(int)
+
+        patches.to_csv(f"temp.svalbard/uncertainty/patch_method_{key}.csv", index=False)
+
+        print(patches)
+
+    
+
+        
+
+    return
+        
 
 
 if __name__ == "__main__":
