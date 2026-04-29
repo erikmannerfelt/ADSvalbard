@@ -871,16 +871,20 @@ def main(verbose=True, n_points=10000, redo=False, random_seed=1):
     variogram[["exp", "err_exp"]] *= exp_scale
     # Remove erroneous points that are far beyond the full variance of the data
     # variogram = variogram[variogram["exp"] < pts[scaled_col].var() * 1.15]
-    print(variogram)
+
+    variogram.to_csv("temp.svalbard/uncertainty/empirical_variogram.csv")
 
     vgm_model, params = xdem.spatialstats.fit_sum_model_variogram(["Sph", "Gaussian"], variogram, p0=[1e2, 1e-4, 1e4, 1e-4])
+
+    params.to_csv("temp.svalbard/uncertainty/variogram_model.csv", index=False)
+
 
     areas = 10 ** np.linspace(0, np.log10(35000e6), 1000)
     neff = []
     for area in areas:
         neff.append(xdem.spatialstats.neff_circular_approx_numerical(area, params))
 
-    pd.Series(neff, pd.Index(areas, name="neff")).to_csv("vgm_neff_cirq.csv")
+    pd.Series(neff, pd.Index(areas, name="area"), name="neff").to_csv("temp.svalbard/uncertainty/vgm_neff_cirq.csv")
 
     variogram["bin_width"] = np.r_[[0], np.diff(variogram.index)]
     fig = plt.figure(figsize=(8.3 * 0.81, 5 * 0.81))

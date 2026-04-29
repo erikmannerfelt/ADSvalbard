@@ -601,7 +601,7 @@ def main(n_points: int = 5000, verbose: bool = True):
         adsvalbard.stacking.create_median_stack(years=year, n_threads=2, raster_type="dem_vertcoreg", bounds_override=bounds, vertcoreg_label="austfonna", nchunks_override=None)
         
 
-def temporal_biascorr_inner(chunks: gpd.GeoDataFrame, product_str: str, mosaic_dir: Path, year: int, redo: bool = False, max_vcorr_magnitude: float = 0.6):
+def temporal_biascorr_inner(chunks: gpd.GeoDataFrame, product_str: str, mosaic_dir: Path, year: int, redo: bool = False, max_vcorr_magnitude: float = 0.6, return_first_chunk: bool = False, filepath_override: dict[str, Path] = {}, verbose: bool = True):
     import rasterio as rio
     import matplotlib.pyplot as plt
     import scipy.ndimage
@@ -611,42 +611,56 @@ def temporal_biascorr_inner(chunks: gpd.GeoDataFrame, product_str: str, mosaic_d
     import adsvalbard.mosaicking
     import shapely.geometry
 
+    filepaths = {
+        "ocean": mosaic_dir / f"dem_{year}_ocean.vrt",
+        "stable_terrain": CONSTANTS.temp_dir / "stable_terrain.tif",
+        "quality": mosaic_dir / f"dem_{year}_quality.vrt",
+        "nmad": mosaic_dir / f"{product_str}_nmad.vrt",
+        "slope": mosaic_dir / f"{product_str}_slope.vrt",
+    } | filepath_override
+
     res = CONSTANTS.res
 
     bounds = rio.coords.BoundingBox(*chunks.total_bounds)
-    with rio.open(mosaic_dir / f"dem_{year}_ocean.vrt") as raster:
+    with rio.open(filepaths["ocean"]) as raster:
         window = rio.windows.from_bounds(*bounds, raster.transform)
-        print("Reading ocean")
+        if verbose:
+            print("Reading ocean")
         ocean = raster.read(1, window=window, boundless=True) == 1
 
         arr_bounds = rio.windows.bounds(window, raster.transform)
-        print("Constructing coords")
+        if verbose:
+            print("Constructing coords")
         x_coords, y_coords = np.meshgrid(
             np.linspace(arr_bounds[0] + raster.res[0] / 2, arr_bounds[2] - raster.res[0] / 2, ocean.shape[1]), 
             np.linspace(arr_bounds[1] + raster.res[1] / 2, arr_bounds[3] - raster.res[1] / 2, ocean.shape[0])[::-1], 
         )
 
         window_transform = rio.windows.transform(window, raster.transform)
-    with rio.open(CONSTANTS.temp_dir / "stable_terrain.tif") as raster:
-        print("Reading stable")
+    with rio.open(filepaths["stable_terrain"]) as raster:
+        if verbose:
+            print("Reading stable")
         window = rio.windows.from_bounds(*bounds, raster.transform)
         stable_terrain = raster.read(1, window=window, boundless=True) == 1
         
     glaciers = (~ocean) & (~stable_terrain)
 
-    with rio.open(mosaic_dir / f"dem_{year}_quality.vrt") as raster:
-        print("Reading quality")
+    with rio.open(filepaths["quality"]) as raster:
+        if verbose:
+            print("Reading quality")
         window = rio.windows.from_bounds(*bounds, raster.transform)
         missing_data = (raster.read(1, window=window, boundless=True) == 0)
 
-    print("Dilating")
+    if verbose:
+        print("Dilating")
     patch = missing_data & glaciers
     valid = (~missing_data) & glaciers
 
     edge_invalid = patch & scipy.ndimage.binary_dilation(valid, structure=np.ones((3, 3)))
     edge_valid   = valid & scipy.ndimage.binary_dilation(patch, structure=np.ones((3, 3)))
 
-    print("Constructing coords")
+    if verbose:
+        print("Constructing coords")
     pts = pd.DataFrame({"x_valid": x_coords[edge_valid], "y_valid": y_coords[edge_valid]})
     invalid_pts = pd.DataFrame({"x_invalid": x_coords[edge_invalid], "y_invalid": y_coords[edge_invalid]})
 
@@ -674,31 +688,36 @@ def temporal_biascorr_inner(chunks: gpd.GeoDataFrame, product_str: str, mosaic_d
     #
     #
 
-    print("Sampling NMAD")
+    if verbose:
+        print("Sampling NMAD")
     smp = adsvalbard.rasters.sample_raster(
-        mosaic_dir / f"{product_str}_nmad.vrt",
+        filepaths["nmad"],
         gpd.points_from_xy(
             x=np.r_[pts["x_valid"], pts["x_invalid"]],
             y=np.r_[pts["y_valid"], pts["y_invalid"]],
         )
     )
-    print(pts.shape)
+    if verbose:
+        print(pts.shape)
     pts = pts[np.max((smp[:pts.shape[0]], smp[pts.shape[0]:]), axis=0) < 2.]
 
-    print("Sampling slope")
+    if verbose:
+        print("Sampling slope")
     smp = adsvalbard.rasters.sample_raster(
-        mosaic_dir / f"{product_str}_slope.vrt",
+        filepaths["slope"],
         gpd.points_from_xy(
             x=np.r_[pts["x_valid"], pts["x_invalid"]],
             y=np.r_[pts["y_valid"], pts["y_invalid"]],
         )
     )
-    print(pts.shape)
+    if verbose:
+        print(pts.shape)
     pts["val_valid"] = smp[:pts.shape[0]]
     pts["val_invalid"] = smp[pts.shape[0]:]
     pts["diff"] = pts["val_valid"] - pts["val_invalid"]
     pts = pts[np.abs(pts["diff"]) < max_vcorr_magnitude]
-    print(pts.shape)
+    if verbose:
+        print(pts.shape)
     # pts["diff"] = 1.
     # pts = pts.dropna(subset="diff")
 
@@ -719,7 +738,8 @@ def temporal_biascorr_inner(chunks: gpd.GeoDataFrame, product_str: str, mosaic_d
         raise ValueError(f"Grid empty.\nPts: {pts}")
     grid = pd.concat(grid)
 
-    print("Interpolating diff")
+    if verbose:
+        print("Interpolating diff")
     model = scipy.interpolate.RBFInterpolator(grid[["x", "y"]], grid["diff"].astype("float32"), kernel="linear")
 
 
@@ -728,7 +748,8 @@ def temporal_biascorr_inner(chunks: gpd.GeoDataFrame, product_str: str, mosaic_d
         if chunk["tbias_filepath"].is_file() and not redo:
             print(f"Skipping {chunk['tbias_filepath'].name} as it already exists")
             continue
-        print(chunk["chunk_id"])
+        if verbose:
+            print(chunk["chunk_id"])
         chunk_bounds = chunk.geometry.bounds
         window = rio.windows.from_bounds(*chunk_bounds, window_transform)
         # for attr in ["col_off", "row_off", "height", "width"]:
@@ -761,9 +782,12 @@ def temporal_biascorr_inner(chunks: gpd.GeoDataFrame, product_str: str, mosaic_d
             )
         )
 
+        if return_first_chunk:
+            return pred
+
         with rio.open(chunk["slope_filepath"]) as raster:
             raster_params = raster.meta
-            trend = (raster.read(1, masked=True).astype("float32") * raster.scales[0]).filled(np.nan)
+            # trend = (raster.read(1, masked=True).astype("float32") * raster.scales[0]).filled(np.nan)
         adsvalbard.mosaicking.write_formatted(
             "slope_",  # This will trigger the same write profile as the slope rasters
             chunk["tbias_filepath"],
@@ -898,6 +922,17 @@ def create_summed_vrt(path1: Path, path2: Path, vrt_path: Path, band=1):
         outfile.write(vrt_content)
 
     
+def get_temporal_biascorr_fixes() -> list[tuple[float, tuple[float, float, float, float]]]:
+    fixes = [
+        (2024, (693517, 8823582,730963, 8930063)), # E Austfonna
+        (2024, (659308,8894594,672531,8918846)), # Duvebreen
+        # (2024, (604638.5465,8861780.8961,634862.2933,8905775.9468)), # Vestfonna
+        # (458480.3002,8771056.3376,465609.6921,8800975.4095), # Isachsenfonna
+        (2024, (458850.2849,8771734.1000,460606.0061,8789243.8596)), # Isachsenfonna narrow
+        (2019, (609672.0295,8887533.0667,627532.6505,8905734.2504)), # Vestfonna 2
+    ]
+    return fixes
+    
 
 def temporal_biascorr(redo: bool = False):
     import rasterio as rio
@@ -914,14 +949,7 @@ def temporal_biascorr(redo: bool = False):
 
     all_chunks = gpd.read_file(temp_dir / "chunk_outlines.geojson")
 
-    fixes = [
-        (2024, (693517, 8823582,730963, 8930063)), # E Austfonna
-        (2024, (659308,8894594,672531,8918846)), # Duvebreen
-        # (2024, (604638.5465,8861780.8961,634862.2933,8905775.9468)), # Vestfonna
-        # (458480.3002,8771056.3376,465609.6921,8800975.4095), # Isachsenfonna
-        (2024, (458850.2849,8771734.1000,460606.0061,8789243.8596)), # Isachsenfonna narrow
-        (2019, (609672.0295,8887533.0667,627532.6505,8905734.2504)), # Vestfonna 2
-    ]
+    fixes = get_temporal_biascorr_fixes()
     
     all_chunks["tbias_filepath"] = all_chunks["chunk_id"].apply(lambda chunk_id: chunk_dir / f"{chunk_id}/{chunk_id}_{product_str}_slope_tbias.tif")
     all_chunks["slope_filepath"] = all_chunks["tbias_filepath"].apply(lambda fp: fp.with_name(fp.name.replace("_tbias.tif", ".tif")))

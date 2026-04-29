@@ -1,3 +1,4 @@
+import tempfile
 from adsvalbard import outlines, vert_coreg
 from adsvalbard.constants import CONSTANTS
 import rasterio as rio
@@ -8,6 +9,7 @@ import shutil
 import tqdm
 import tqdm.contrib.concurrent
 import warnings
+import shapely.geometry
 
 from pathlib import Path
 import matplotlib.pyplot as plt
@@ -104,6 +106,7 @@ def make_err_function(points: gpd.GeoDataFrame, pred_col: str, var_cols: list[st
         statistics=["count", xdem.spatialstats.nmad],
         list_var_bins=[bins[key] for key in var_cols],
     )
+    df.to_csv(f"temp.svalbard/uncertainty/binned_terrain_err_{pred_col}.csv")
     
     dh_err_func_unscaled = xdem.spatialstats.interp_nd_binning(df, list_var_names=var_cols, statistic="nmad", min_count=5)
 
@@ -130,6 +133,12 @@ def apply_function(chunk_dir: Path, func, pred_col: str, var_cols: list[str], re
     chunk_nr = chunk_dir.stem.replace("chunk_", "")
 
     out_path = temp_dir / f"{chunk_dir.parts[-2]}/chunk_{chunk_nr}_{pred_col}_err.tif"
+
+    tcorr_err_path = out_path.with_stem(out_path.stem.replace("_err", "_tcorr_err"))
+
+    #if tcorr_err_path.is_file():
+    #    redo = True
+    #    print(tcorr_err_path)
 
     if out_path.is_file() and not redo:
         return out_path
@@ -177,6 +186,22 @@ def apply_function(chunk_dir: Path, func, pred_col: str, var_cols: list[str], re
                 arrs[key] = (arr * raster.scales[0] + raster.offsets[0]).filled(np.nan).ravel()
 
     err = np.hypot(func(arrs), err)
+
+    if tcorr_err_path.is_file():
+
+        with rio.open(tcorr_err_path) as raster:
+            tcorr_err = (raster.read(1, masked=True).astype("float32") * raster.scales[0]).filled(0).ravel()
+
+        err = np.hypot(tcorr_err, err)
+        # if "004_015" in tcorr_err_path.stem:
+        #     import matplotlib.pyplot as plt
+        #     plt.subplot(1, 3, 1)
+        #     plt.imshow(err.copy().reshape((meta["height"], meta["width"])), vmin=0, vmax=0.5)
+        #     plt.subplot(1, 3, 2)
+        #     plt.imshow(tcorr_err.copy().reshape((meta["height"], meta["width"])), vmin=0, vmax=0.5)
+        #     plt.subplot(1, 3, 3)
+        #     plt.imshow(err.reshape((meta["height"], meta["width"])), vmin=0, vmax=0.5)
+        #     plt.show()
 
     scale = (65534 / 10)
     err = np.where(
@@ -748,6 +773,508 @@ def patch_method_uncertainty():
 
     return
         
+import numpy as np
+import scipy.ndimage
+
+
+def mix_trends_with_square_gaps(
+    trend_with_2024: np.ndarray,
+    trend_without_2024: np.ndarray,
+    gap_size_px: int,
+    *,
+    res: float = 1.0,
+    edge_buffer_px: int = 30,
+    inner_buffer_px: int = 30,
+    smallest_gap_px: int = 100,
+    max_small_gaps: int = 100,
+    min_large_gaps: int = 4,
+):
+    """
+    Mix two trend rasters by inserting square gaps from trend_without_2024 into
+    trend_with_2024.
+
+    Parameters
+    ----------
+    trend_with_2024 : np.ndarray
+        Reference trend raster (used outside simulated gaps).
+    trend_without_2024 : np.ndarray
+        Trend raster to insert inside simulated gaps.
+    gap_size_px : int
+        Side length of each square gap in pixels.
+    res : float, default=1.0
+        Pixel size. The returned distance mask is in these units.
+    edge_buffer_px : int, default=30
+        Width of protected outer border that is always taken from trend_with_2024.
+    inner_buffer_px : int, default=30
+        Minimum spacing between gap members.
+    smallest_gap_px : int, default=100
+        Reference size used for scaling the number of gaps.
+    max_small_gaps : int, default=100
+        Target number of gaps when gap_size_px == smallest_gap_px.
+    min_large_gaps : int, default=4
+        Minimum target number of gaps for large patches, if they fit.
+
+    Returns
+    -------
+    mixed : np.ndarray
+        Mixed raster.
+    dist_mask : np.ndarray
+        Distance-to-nearest non-gap pixel, in `res` units.
+        Outside gaps, the value is 0.
+    gap_mask : np.ndarray
+        Boolean mask of simulated gaps.
+    """
+
+    if trend_with_2024.shape != trend_without_2024.shape:
+        raise ValueError("Input arrays must have the same shape.")
+
+    if trend_with_2024.ndim != 2:
+        raise ValueError("Only 2D arrays are supported.")
+
+    if gap_size_px <= 0:
+        raise ValueError("gap_size_px must be > 0.")
+
+    h, w = trend_with_2024.shape
+
+    avail_h = h - 2 * edge_buffer_px
+    avail_w = w - 2 * edge_buffer_px
+
+    if gap_size_px > avail_h or gap_size_px > avail_w:
+        raise ValueError(
+            "gap_size_px is too large to fit inside the protected edge buffer."
+        )
+
+    # Maximum number of squares that can fit while respecting minimum spacing.
+    max_rows = 1 + (avail_h - gap_size_px) // (gap_size_px + inner_buffer_px)
+    max_cols = 1 + (avail_w - gap_size_px) // (gap_size_px + inner_buffer_px)
+
+    if max_rows < 1 or max_cols < 1:
+        raise ValueError("No gaps can fit with the current settings.")
+
+    max_possible = int(max_rows * max_cols)
+
+    # Scale gap count roughly ~ 1 / gap_area, but never below min_large_gaps if possible.
+    target_n = int(round(max_small_gaps * (smallest_gap_px / gap_size_px) ** 2))
+    target_n = max(min_large_gaps, target_n)
+    target_n = min(max_possible, target_n)
+
+    def choose_grid_shape(target, max_r, max_c, aspect):
+        best = None
+        for nr in range(1, max_r + 1):
+            for nc in range(1, max_c + 1):
+                n = nr * nc
+                if n > target:
+                    continue
+                shape_aspect = nc / nr
+                score = (
+                    target - n,                 # prefer as many as possible up to target
+                    abs(np.log(shape_aspect / aspect)),  # prefer chunk-like layout
+                )
+                if best is None or score < best[0]:
+                    best = (score, nr, nc)
+
+        if best is None:
+            # Fallback: smallest possible grid
+            return 1, 1
+
+        return best[1], best[2]
+
+    nr, nc = choose_grid_shape(target_n, max_rows, max_cols, avail_w / avail_h)
+
+    # Place gaps evenly inside the valid interior.
+    y0_min = edge_buffer_px
+    y0_max = h - edge_buffer_px - gap_size_px
+    x0_min = edge_buffer_px
+    x0_max = w - edge_buffer_px - gap_size_px
+
+    if nr == 1:
+        y_starts = np.array([(y0_min + y0_max) // 2], dtype=int)
+    else:
+        y_starts = np.round(np.linspace(y0_min, y0_max, nr)).astype(int)
+
+    if nc == 1:
+        x_starts = np.array([(x0_min + x0_max) // 2], dtype=int)
+    else:
+        x_starts = np.round(np.linspace(x0_min, x0_max, nc)).astype(int)
+
+    gap_mask = np.zeros((h, w), dtype=bool)
+    gap_id_mask = np.zeros((h, w), dtype=np.int32)
+    
+    gap_id = 1
+    for y0 in y_starts:
+        for x0 in x_starts:
+            y1 = y0 + gap_size_px
+            x1 = x0 + gap_size_px
+
+            gap_mask[y0:y1, x0:x1] = True
+            gap_id_mask[y0:y1, x0:x1] = gap_id
+
+            gap_id += 1
+
+    mixed = np.array(trend_with_2024, copy=True)
+    mixed[gap_mask] = trend_without_2024[gap_mask]
+
+    # Distance inside gaps to nearest non-gap pixel, in units of `res`.
+    dist_mask = scipy.ndimage.distance_transform_edt(gap_mask) * res
+
+    return mixed, dist_mask, gap_mask, gap_id_mask
+
+def get_nmad(data):
+    median = np.nanmedian(data, axis=-1)
+  
+    return 1.4826 * np.nanmedian(np.abs(data - median), axis=-1)
+
+
+def get_temporal_biascorr_uncertainty_relationship(chunk_nr: str = "005_018", redo: bool = False):
+    out_path = Path("temp.svalbard/uncertainty/temporal_biascorr_area_nmad.csv")
+    out_path2 = Path("temp.svalbard/uncertainty/temporal_biascorr_distance_nmad.csv")
+
+    if out_path.is_file() and out_path2.is_file() and not redo:
+        out = pd.read_csv(out_path).set_index("area_m2").squeeze()
+        out2 = pd.read_csv(out_path2).set_index("distance_m").squeeze()
+        return (out, out2)
+    import adsvalbard.mosaicking
+    import adsvalbard.vert_coreg
+    base_pattern = f"temp.svalbard/filt/svalbard/chunks_3584/chunk_{chunk_nr}/chunk_{chunk_nr}"
+    meta = {}
+
+    chunks = gpd.read_file("temp.svalbard/chunk_outlines.geojson").query(f"chunk_id == 'chunk_{chunk_nr}'")
+    chunks["tbias_filepath"] = Path("/dev/null")
+
+    dems = []
+    flags = []
+    for year in range(2019, 2025):
+        if year == 2024:
+            dems.append(np.full_like(dems[-1], np.nan))
+            flags.append(np.zeros_like(flags[-1]))
+            continue
+        with rio.open(f"{base_pattern}_{year}.tif") as raster:
+            dems.append((raster.read(1, masked=True) * raster.scales[0]).filled(np.nan).ravel()[:, None])
+        with rio.open(f"{base_pattern}_{year}_quality.tif") as raster:
+            flags.append(raster.read(1).ravel()[:, None])
+
+    dems = np.hstack(dems)
+    flags = np.hstack(flags)
+            
+
+    with rio.open(f"{base_pattern}_trend_2019-2024_slope.tif") as raster:
+        meta = raster.meta
+        res = raster.res[0]
+        trend_with_2024 = (raster.read(1, masked=True) * raster.scales[0]).filled(np.nan)
+
+        
+    trend_without_2024 = adsvalbard.mosaicking.fit_trend(
+        dems,
+        flags,
+        verbose=False,
+    )["slope"].reshape(trend_with_2024.shape)
+
+
+    areas = np.empty((0,))
+    area_nmads = np.empty((0,))
+    diffs = np.empty((0,))
+    distances = np.empty((0,))
+    for gap_size_px in tqdm.tqdm(np.linspace(100, 1500, 60, dtype=int)):
+        mixed, dist_mask, gap_mask, gap_id_mask =  mix_trends_with_square_gaps(trend_with_2024=trend_with_2024, trend_without_2024=trend_without_2024, gap_size_px=gap_size_px, res=res, min_large_gaps=10)
+
+
+        with tempfile.TemporaryDirectory() as temp_dir_str:
+            temp_dir = Path(temp_dir_str)
+            slope_temp_path = temp_dir / "slope.tif"
+            qual_temp_path = temp_dir / "quality.tif"
+
+            with rio.open(slope_temp_path, "w", count=1, height=mixed.shape[0], width=mixed.shape[1], transform=meta["transform"], crs=meta["crs"], dtype="float32") as raster:
+                raster.write(mixed, 1) 
+
+            quality = np.full(mixed.shape, 4, dtype="uint8")
+            quality[gap_mask] = 0
+            with rio.open(qual_temp_path, "w", count=1, height=mixed.shape[0], width=mixed.shape[1], transform=meta["transform"], crs=meta["crs"], dtype="uint8") as raster:
+                raster.write(quality, 1) 
+
+
+            bias: np.ndarray = adsvalbard.vert_coreg.temporal_biascorr_inner(
+                chunks=chunks,
+                product_str="trend_2019-2024",
+                mosaic_dir=Path("temp.svalbard/filt/svalbard/mosaics_3584/"),
+                year=2024,
+                redo=True,
+                return_first_chunk=True,
+                filepath_override={
+                    "slope": slope_temp_path,
+                    "quality": qual_temp_path,
+                },
+                verbose=False,
+            )
+        diff_vals = (mixed[gap_mask] + bias[gap_mask]) - trend_with_2024[gap_mask]
+
+        diff_means = []
+        for idx in np.unique(gap_id_mask):
+            if idx == 0:
+                continue
+
+            diff_means.append(np.nanmean(diff_vals[gap_id_mask[gap_mask] == idx]))
+
+        area_nmads = np.append(area_nmads, [get_nmad(diff_means)])
+        areas = np.append(areas, [(gap_size_px * res) ** 2])
+
+        diffs = np.concatenate([diffs, diff_vals])
+        distances = np.concatenate([distances, dist_mask[gap_mask]])
+
+
+    
+
+        # import matplotlib.pyplot as plt
+        # plt.subplot(1, 4, 1)
+        # plt.imshow(mixed, vmin=-1, vmax=1, cmap="RdBu")
+        # plt.subplot(1, 4, 2)
+        # plt.imshow(dist_mask, vmin=0, vmax=5000)
+        # plt.subplot(1, 4, 3)
+        # plt.imshow(gap_mask)
+        # plt.subplot(1, 4, 4)
+        # plt.imshow(bias, vmin=-.1, vmax=.1, cmap="RdBu")
+
+        # plt.show()
+    
+    out = pd.Series(area_nmads, index=areas, name="nmad")
+    out.index.name = "area_m2"
+    out.to_csv(out_path)
+
+    dist_bins = np.linspace(-0.01, distances.max() + 0.01, 50)
+    bin_centers = (dist_bins[1:] + dist_bins[:-1]) / 2
+    digitized = np.digitize(distances, bins=dist_bins)
+
+    nmads = []
+    for idx in np.unique(digitized):
+        vals = diffs[digitized == idx]
+
+        nmad = get_nmad(vals)
+        nmads.append(nmad)
+
+    out2 = pd.Series(nmads, index=bin_centers, name="nmad")
+    out2.index.name = "distance_m"
+    out2.to_csv(out_path2)
+
+    return out, out2
+    import matplotlib.pyplot as plt
+    plt.scatter(areas, area_nmads)
+    plt.show()
+    return
+
+def peak_with_linear_tail(x, params):
+    """
+    Model: Gaussian peak + linear tail, blended with a logistic switch.
+
+    params = [A, mu, sigma, m, c, k, x0]
+    """
+    A, mu, sigma, m, c, k, x0 = params
+
+    # Gaussian peak
+    g = A * np.exp(- (x - mu)**2 / (2.0 * sigma**2))
+
+    # Linear tail
+    ell = m * x + c
+
+    # Logistic switching function
+    s = 1.0 / (1.0 + np.exp(k * (x - x0)))
+
+    # Blend: s(x)*g(x) + (1-s(x))*ell(x)
+    return g * s + ell * (1.0 - s)
+
+
+def get_temporal_biascorr_uncertainty(verbose: bool = True, include_neff_standardization: bool = False):
+    """
+
+    Parameters
+    ----------
+    include_neff_standardization
+        Standardize each patch so that the integrated error (using a neff model) is equal to the empirical estimation.
+        From testing, this changes very little but introduces a lot of complexity. Therefore, it's off by default.
+    """
+    import adsvalbard.vert_coreg
+    import adsvalbard.mosaicking
+    import scipy.optimize
+    import scipy.ndimage
+    import matplotlib.pyplot as plt
+
+    per_area, per_distance = get_temporal_biascorr_uncertainty_relationship(redo=False)
+
+    # Some strange outliers make fitting difficult. This removes them
+    per_distance = per_distance.loc[:2800]
+    # distance_err_model = lambda distance: spherical_model(distance, distance_model_res.x)
+    distance_err_model = np.poly1d(np.polyfit(per_distance.index, per_distance, deg=1))
+
+    per_area.index /= 1e6
+    per_area.index.name = "area_km2"
+
+
+    if include_neff_standardization:
+        # This fits a Gaussian peak at around 12 km² (assessed visually) and then it tapers to a linear
+        # reducing trend
+        area_model_res = scipy.optimize.least_squares(
+            lambda params, x, y: peak_with_linear_tail(x, params) - y,
+            x0=[
+                0.02,   # A      ~ peak height
+                12.0,   # mu     ~ peak position
+                2.3,    # sigma  ~ peak width
+                -0.0002,# m      ~ slope of tail (negative small)
+                0.02,   # c      ~ intercept so tail near peak ~ 0.02
+                0.5,    # k      ~ transition sharpness
+                17.0    # x0     ~ transition location (12 + 5)
+            ],
+            args=(per_area.index, per_area.values),
+        )
+        # The area error model is clamped to the lowest trailing values to avoid going <= 0
+        area_err_model = lambda area: np.clip(peak_with_linear_tail(area, area_model_res.x), a_min=np.percentile(per_area.iloc[:-10], 10), a_max=np.inf)
+        neff_model = lambda area: (area_err_model(area) / area_err_model(0)) ** 2
+
+        neff_data = pd.read_csv("vgm_neff_cirq.csv")
+        neff_model = scipy.interpolate.interp1d(neff_data.values[:, 0] / 1e6, neff_data.values[:, 1])
+    # plt.scatter(per_distance.index, per_distance)
+    # plt.plot(per_distance.index, distance_err_model(per_distance.index))
+    # plt.show()
+
+    
+    # return
+
+    # xs = np.linspace(0, 100)
+    # plt.scatter(per_area.index, per_area)
+    # plt.plot(xs, area_err_model(xs))
+    # plt.show()
+    # return
+
+    all_chunks = gpd.read_file("temp.svalbard/chunk_outlines.geojson")
+
+    mosaic_dir = Path(f"temp.svalbard/filt/svalbard/mosaics_3584")
+    fixes = adsvalbard.vert_coreg.get_temporal_biascorr_fixes()
+    for i, (year, bounds) in enumerate(fixes):
+        filepaths = {
+            "ocean": mosaic_dir / f"dem_{year}_ocean.vrt",
+            "stable_terrain": CONSTANTS.temp_dir / "stable_terrain.tif",
+            "quality": mosaic_dir / f"dem_{year}_quality.vrt",
+            "nmad": mosaic_dir / f"trend_2019-2024_nmad.vrt",
+            "slope": mosaic_dir / f"trend_2019-2024_slope.vrt",
+        }
+        print(f"Fix {i+1} / {len(fixes)}: {rio.coords.BoundingBox(*bounds)}")
+        chunks = all_chunks[all_chunks.intersects(shapely.geometry.box(*bounds))]
+        bounds = rio.coords.BoundingBox(*chunks.total_bounds)
+
+        with rio.open(filepaths["ocean"]) as raster:
+            window = rio.windows.from_bounds(*bounds, raster.transform)
+            if verbose:
+                print("Reading ocean")
+            ocean = raster.read(1, window=window, boundless=True) == 1
+
+            # arr_bounds = rio.windows.bounds(window, raster.transform)
+            if verbose:
+                print("Constructing coords")
+            # x_coords, y_coords = np.meshgrid(
+            #     np.linspace(arr_bounds[0] + raster.res[0] / 2, arr_bounds[2] - raster.res[0] / 2, ocean.shape[1]), 
+            #     np.linspace(arr_bounds[1] + raster.res[1] / 2, arr_bounds[3] - raster.res[1] / 2, ocean.shape[0])[::-1], 
+            # )
+
+            window_transform = rio.windows.transform(window, raster.transform)
+        with rio.open(filepaths["stable_terrain"]) as raster:
+            if verbose:
+                print("Reading stable")
+            window = rio.windows.from_bounds(*bounds, raster.transform)
+            stable_terrain = raster.read(1, window=window, boundless=True) == 1
+        
+        glaciers = (~ocean) & (~stable_terrain)
+        with rio.open(filepaths["quality"]) as raster:
+            window = rio.windows.from_bounds(*bounds, raster.transform)
+            missing_data = (raster.read(1, window=window, boundless=True) == 0)
+
+        
+        patch = missing_data & glaciers
+
+        gap_distance = scipy.ndimage.distance_transform_edt(patch) * raster.res[0]
+        err_d = np.zeros(patch.shape, dtype="float64")
+        err_d[patch] = distance_err_model(gap_distance[patch])
+
+
+        if include_neff_standardization:
+            # Label and process each patch part individually
+            labeled, _ = scipy.ndimage.label(patch, structure=np.ones((3, 3)))
+            areas = pd.Series(*np.unique(labeled, return_counts=True)[::-1]).drop([0])
+            areas = (areas *  (raster.res[0] ** 2) / 1e6).sort_values()
+
+            # Merge all patches below 1 km² because it can be tens of thousands of individual pixels
+            to_merge = areas[areas < 1].index
+            labeled[np.isin(labeled, to_merge)] = areas.index.max() + 1
+            areas[areas.index.max() + 1] = areas[to_merge].sum()
+            areas.drop(to_merge, inplace=True)
+
+            for idx, gap_area_km2 in areas.items():
+                err_area = area_err_model(gap_area_km2)
+                neff = neff_model(gap_area_km2)
+                target_mean_err = err_area * np.sqrt(neff)
+                d_mean_err = np.nanmean(err_d[labeled == idx])
+                inflation = target_mean_err / d_mean_err
+                err_d[labeled == idx] *= inflation
+
+    
+                print(f"{target_mean_err=:.2f}, {d_mean_err=:.2f}, {neff=:.2f}, {gap_area_km2=:.2f}") 
+
+
+        for _, chunk in chunks.iterrows():
+
+            se_path = Path(f"temp.svalbard/filt/svalbard/chunks_3584/{chunk['chunk_id']}/{chunk['chunk_id']}_trend_2019-2024_slope.tif")
+
+            out_path = Path(f"temp.svalbard/uncertainty/chunks_3584/{se_path.stem.replace('_slope', '_slope_tcorr_err')}.tif")
+            with rio.open(se_path) as reference:
+
+                data_window = rio.windows.from_bounds(*reference.bounds, transform=window_transform).round_offsets().round_lengths()
+
+                meta = reference.meta
+
+            print(meta)
+
+            adsvalbard.mosaicking.write_formatted(
+                "slope_",  # This will trigger the same write profile as the slope rasters
+                out_path,
+                err_d[*data_window.toslices()],
+                params=meta,
+                redo=True,
+            )
+            # with rio.open(se_path.with_stem(se_path.stem.replace("_slope", "_slope_tcorr_err"))) as raster:
+
+                # print(data_window.toslices())
+            
+
+        # plt.subplot(1,2, 1)
+        # plt.imshow(gap_distance)
+        # plt.subplot(1,2, 2)
+        # plt.imshow(err_d)
+
+        # plt.show()
+
+    # dist_bins = np.linspace(-0.01, distances.max() + 0.01, 50)
+    # bin_centers = (dist_bins[1:] + dist_bins[:-1]) / 2
+    # digitized = np.digitize(distances, bins=dist_bins)
+
+    # import matplotlib.pyplot as plt
+    # for idx in np.unique(digitized):
+    #     vals = diffs[digitized == idx]
+
+    #     nmad = get_nmad(vals)
+
+    #     plt.scatter(bin_centers[idx - 1], nmad)
+
+    # plt.show()
+
+
+    # diff = trend_with_2024 - trend_without_2024
+
+    # import matplotlib.pyplot as plt
+    # plt.subplot(1, 3, 1)
+    # plt.imshow(trend_without_2024, vmin=-1, vmax=1, cmap="RdBu")
+    # plt.subplot(1, 3, 2)
+    # plt.imshow(trend_with_2024, vmin=-1, vmax=1, cmap="RdBu")
+    # plt.subplot(1, 3, 3)
+    # plt.imshow(diff, vmin=-0.2, vmax=0.2, cmap="RdBu")
+    # plt.show()
+
+            
 
 
 if __name__ == "__main__":
