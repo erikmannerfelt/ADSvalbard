@@ -746,8 +746,8 @@ def main(verbose=True, n_points=10000, redo=False, random_seed=1):
     bbox = (396000, 8479000, 727000, 8954000) # Spitsbergen and Nordaustlandet
     bins = 10 ** np.linspace(np.log10(30), np.log10(2.5e5), 50) 
     
-    cache_path = Path("temp.svalbard/uncertainty/vgm_sample_pts.arrow")
     var_col = "trend_2013-2024_slope"
+    cache_path = Path(f"temp.svalbard/uncertainty/vgm_sample_pts_{var_col}.arrow")
     err_col = var_col.replace("_slope", "_slope_err")
     # err_col = var_col + "_se"
 
@@ -762,7 +762,7 @@ def main(verbose=True, n_points=10000, redo=False, random_seed=1):
                 stable_path="temp/stable_terrain.tif",
                 n_points=n_points,
                 bins=bins,
-                bbox=bbox,          # important: only work inside the analysis region
+                bbox=bbox,
                 coarse_factor=16,   # 5 m -> 80 m support grid
                 n_init=64,
                 pool=32,
@@ -790,91 +790,35 @@ def main(verbose=True, n_points=10000, redo=False, random_seed=1):
         pts[err_col] = adsvalbard.rasters.sample_raster(f"temp.svalbard/filt/svalbard/mosaics_3584/{err_col}.vrt", geometry=pts["geometry"])
         pts.to_feather(cache_path)
 
+    var_col = var_col
     original_var = pts[var_col].var()
     pts = pts[pts[err_col] < (3 * pts[err_col].median())]
     pts = pts[np.abs(pts[var_col]) < (3 * np.abs(pts[var_col]).median())]
     scaled_col = var_col + "_scaled"
     pts[scaled_col] = (1e-3 + pts[err_col].mean()) * pts[var_col] / (pts[err_col] + 1e-3)
 
-    
-    # print(pts[scaled_col].describe())
-    # print(pts[var_col].describe())
-
-    
-    # plt.hist(pts[err_col])
-    # plt.show()
-    # return
-    # print(pts.shape)
-    # return
-
-    # print("Reading land")
-    # if verbose:
-    #     print("Reading land outlines")
-    # land = gpd.read_file("zip://data/outlines/NP_S100_SHP.zip/NP_S100_SHP/S100_Land_f.shp", bbox=bbox).simplify(100).to_frame().dissolve().to_crs(32633)[0].item()
-
-    # if verbose:
-    #     print("Reading glacier outlines")
-    # with warnings.catch_warnings():
-    #     warnings.filterwarnings("ignore")
-    #     glaciers = gpd.read_file("zip://data/outlines/NP_S100_SHP.zip/NP_S100_SHP/S100_Isbreer_f.shp", bbox=bbox).simplify(100).to_frame().dissolve().to_crs(32633)[0].item()
-
-
-    # if verbose:
-    #     print("Making stable terrain")
-    # land = land.difference(glaciers)
-    
-
-    # print("Making sampling points")
-    # start_time = time.time()
-    # pts = sample_variogram_points_bbox_fast(bbox, 15000, bins=bins)
-    # pts = gpd.GeoDataFrame(geometry=gpd.points_from_xy(pts[:, 0], pts[:, 1], crs=32633))
-    # print(pts.shape)
-    # pts = pts[pts.intersects(land)]
-    # print(f"{pts.shape[0]}: {time.time() - start_time:.2f} s")
-
-    # print(pts.shape)
-    # return
-    # for i in range(5):
-    #     print(i)
-    #     if n_pts > 20000:
-    #         break
-    #     pts = sample_variogram_points_bbox_mixture(land.bounds, n_points=50000, bins=bins, seed=i)
-    # pts = pts[pts.intersects(land)]
-    #     n_pts += pts.shape[0]
-
-    #     all_pts.append(pts)
-    # pts = pd.concat(all_pts, ignore_index=True)
-    
-    # dhdt_pts = gpd.read_feather("temp.svalbard/uncertainty/sampled_pts_1000000.arrow").query("stable")
-
     pts["x"] = pts.geometry.x - pts.geometry.x.min()
     pts["y"] = pts.geometry.y - pts.geometry.y.min()
 
-    # bin_func = np.linspace(50, 10000, 10)
-    # bin_func = [50, 100, 150, 200, 250, 300, 400, 500, 600, 700, 800, 900, 1000, 1200, 1400, 2000, 3000, 5000, 7000, 9000, 10000]
-    # np.random.seed(3)
     print(pts[scaled_col].var())
     variogram = xdem.spatialstats.sample_empirical_variogram(
         values=pts[scaled_col].values,
         coords=pts[["x", "y"]].values,
         subsample=500,
         subsample_method="cdist_point",
-        n_variograms=50,
-        # runs=None,
+        n_variograms=100,
         verbose=True,
         bin_func=bins,
         n_jobs=1,
         random_state=random_seed,
     )
 
+
     exp_scale = original_var / pts[scaled_col].var()
     variogram[["exp", "err_exp"]] *= exp_scale
-    # Remove erroneous points that are far beyond the full variance of the data
-    # variogram = variogram[variogram["exp"] < pts[scaled_col].var() * 1.15]
-
     variogram.to_csv("temp.svalbard/uncertainty/empirical_variogram.csv")
 
-    vgm_model, params = xdem.spatialstats.fit_sum_model_variogram(["Sph", "Gaussian"], variogram, p0=[1e2, 1e-4, 1e4, 1e-4])
+    vgm_model, params = xdem.spatialstats.fit_sum_model_variogram(["Sph", "Gaussian"], variogram)
 
     params.to_csv("temp.svalbard/uncertainty/variogram_model.csv", index=False)
 
@@ -893,7 +837,7 @@ def main(verbose=True, n_points=10000, redo=False, random_seed=1):
     axes[1].plot(variogram.index, vgm_model(variogram.index), label="Variogram model", color="black")
     axes[1].errorbar(variogram.index, variogram["exp"], yerr=variogram["err_exp"], fmt="x", label="Empirical variogram", color="royalblue")
 
-    axes[1].set_ylim(0, original_var * 1.32)
+    axes[1].set_ylim(0, vgm_model(variogram.index).max() * 1.25)
     for r in params["range"].values:
         axes[1].vlines(r, *axes[1].get_ylim(), color="gray", linestyles="--")
         
@@ -909,14 +853,6 @@ def main(verbose=True, n_points=10000, redo=False, random_seed=1):
     print(params)
 
     plt.tight_layout()
-    # xdem.spatialstats.plot_variogram(
-    #     variogram,
-    #     xscale_range_split=[100, 1000],
-    #     list_fit_fun=[vgm_model],
-    #     list_fit_fun_label=["Standardized double-range variogram"],
-    # )
-    # xdem.spatialstats.
-    # dhdt.show()
     plt.savefig("figures/ad_variogram.pdf")
     plt.show()
 

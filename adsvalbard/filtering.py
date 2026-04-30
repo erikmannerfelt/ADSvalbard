@@ -944,3 +944,9 @@ def plot_bad_patches(force_redo: bool = False):
     # plt.hist2d(patches["gap_distance"][nan_mask], np.log10(np.abs(patches["npi_dh"][nan_mask]) + 1e-3), density=True)
     # plt.scatter(patches["gap_distance"], np.log10(patches["npi_dh"].abs()), alpha=0.03)
     plt.show()
+
+
+def export_importance_table():
+    model = GapModel.default()
+
+    model.importance.to_csv("temp.svalbard/gap_model_importance_table.csv")
