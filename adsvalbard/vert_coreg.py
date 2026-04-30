@@ -11,6 +11,7 @@ import tqdm
 import tqdm.contrib.concurrent
 import json
 import tempfile
+from xml.sax.saxutils import escape
 
 from pathlib import Path
 from adsvalbard.constants import CONSTANTS
@@ -1004,7 +1005,241 @@ def temporal_biascorr(redo: bool = False):
         mosaic_dir / f"{product_str}_slope_tcorr.vrt",
         in_filepaths,
     )
-   
+
+
+
+
+def _gt_from_affine(transform: rio.Affine) -> str:
+    """
+    Convert rasterio Affine -> GDAL GeoTransform string
+    (c, a, b, f, d, e)
+    """
+    gt = (transform.c, transform.a, transform.b,
+          transform.f, transform.d, transform.e)
+    return ", ".join(repr(v) for v in gt)
+
+
+NODATA_RAW = 65535
+MAX_VALID_RAW = 65534
+def _path_for_vrt(src_path: Path, vrt_path: Path, relative: bool) -> tuple[str, str]:
+    """
+    Return (path_string_for_xml, relativeToVRT_flag)
+    """
+    src_path = src_path.resolve()
+    vrt_path = vrt_path.resolve()
+
+    if relative:
+        try:
+            rel = src_path.relative_to(vrt_path.parent)
+        except ValueError:
+            return str(src_path), "0"
+        return str(rel), "1"
+    else:
+        return str(src_path), "0"
+
+
+def write_hypot_uint16_vrt(
+    raster_a: str | Path,
+    raster_b: str | Path,
+    out_vrt: str | Path,
+    band_a: int = 1,
+    band_b: int = 1,
+    relative_paths: bool = True,
+) -> Path:
+    """
+    Create a UInt16 VRT whose raw values are rounded/clipped hypot(raw_a, raw_b),
+    with NoDataValue=65535 and Scale/Offset copied from the first input band.
+
+    Assumptions:
+      - both inputs are on the same grid
+      - both inputs are UInt16
+      - both inputs have the same scale
+      - both inputs have the same offset (typically 0)
+      - nodata is 65535 on both inputs
+    """
+    raster_a = Path(raster_a)
+    raster_b = Path(raster_b)
+    out_vrt = Path(out_vrt)
+
+    with rio.open(raster_a) as src_a, rio.open(raster_b) as src_b:
+        # Band index checks (Rasterio/GDAL are 1-based)
+        if band_a < 1 or band_a > src_a.count:
+            raise ValueError(f"band_a={band_a} out of range for {raster_a}")
+        if band_b < 1 or band_b > src_b.count:
+            raise ValueError(f"band_b={band_b} out of range for {raster_b}")
+
+        ia = band_a - 1
+        ib = band_b - 1
+
+        # Grid checks
+        if src_a.width != src_b.width or src_a.height != src_b.height:
+            raise ValueError("Raster shapes differ")
+
+        if src_a.crs != src_b.crs:
+            raise ValueError("Raster CRS differ")
+
+        if not src_a.transform.almost_equals(src_b.transform):
+            raise ValueError("Raster transforms differ")
+
+        # Type / nodata checks
+        if src_a.dtypes[ia] != "uint16" or src_b.dtypes[ib] != "uint16":
+            raise ValueError(f"Both source bands must be uint16, got {src_a.dtypes[ia]} and {src_b.dtypes[ib]}")
+
+        nd_a = src_a.nodatavals[ia]
+        nd_b = src_b.nodatavals[ib]
+        if nd_a != NODATA_RAW or nd_b != NODATA_RAW:
+            raise ValueError(f"Expected nodata={NODATA_RAW}, got {nd_a} and {nd_b}")
+
+        # Scale/offset from first band
+        scale_a = src_a.scales[ia] if src_a.scales[ia] is not None else 1.0
+        offset_a = src_a.offsets[ia] if src_a.offsets[ia] is not None else 0.0
+
+        scale_b = src_b.scales[ib] if src_b.scales[ib] is not None else 1.0
+        offset_b = src_b.offsets[ib] if src_b.offsets[ib] is not None else 0.0
+
+        # We require same scale / offset for the "raw hypot + copy output scale" trick
+        if scale_a != scale_b:
+            raise ValueError(f"Input scales differ: {scale_a} vs {scale_b}")
+
+        if offset_a != offset_b:
+            raise ValueError(f"Input offsets differ: {offset_a} vs {offset_b}")
+
+        # Earlier context said offsets are zero. If not zero, raw hypot is not the right formula.
+        if offset_a != 0.0:
+            raise ValueError(
+                f"This raw-domain approach assumes offset=0. "
+                f"Found offset={offset_a}. In that case you must compute in real units and requantize."
+            )
+
+        xsize = src_a.width
+        ysize = src_a.height
+        gt = _gt_from_affine(src_a.transform)
+        srs_wkt = src_a.crs.to_wkt() if src_a.crs else ""
+
+    a_xml_path, a_rel = _path_for_vrt(raster_a, out_vrt, relative_paths)
+    b_xml_path, b_rel = _path_for_vrt(raster_b, out_vrt, relative_paths)
+
+    vrt_xml = f"""<VRTDataset rasterXSize="{xsize}" rasterYSize="{ysize}">
+  <SRS>{escape(srs_wkt)}</SRS>
+  <GeoTransform>{gt}</GeoTransform>
+
+  <VRTRasterBand dataType="UInt16" band="1" subClass="VRTDerivedRasterBand">
+    <ColorInterp>Gray</ColorInterp>
+    <NoDataValue>{NODATA_RAW}</NoDataValue>
+    <Offset>{offset_a}</Offset>
+    <Scale>{scale_a}</Scale>
+
+    <PixelFunctionType>hypot_uint16_raw</PixelFunctionType>
+    <PixelFunctionLanguage>Python</PixelFunctionLanguage>
+    <PixelFunctionCode><![CDATA[
+import numpy as np
+
+def hypot_uint16_raw(in_ar, out_ar, xoff, yoff, xsize, ysize,
+                     raster_xsize, raster_ysize, buf_radius, gt, **kwargs):
+    nodata = np.uint16(int(kwargs.get("nodata", 65535)))
+    max_valid = np.uint16(int(kwargs.get("max_valid", 65534)))
+
+    a = in_ar[0]
+    b = in_ar[1]
+
+    # Start with nodata everywhere
+    out_ar[:] = nodata
+
+    valid = (a != nodata) & (b != nodata)
+    if not np.any(valid):
+        return
+
+    # Compute hypot in float, then round to nearest integer raw DN
+    tmp = np.hypot(a.astype(np.float32, copy=False),
+                   b.astype(np.float32, copy=False))
+
+    np.rint(tmp, out=tmp)
+    np.clip(tmp, 0, int(max_valid), out=tmp)
+
+    out_ar[valid] = tmp[valid].astype(np.uint16)
+]]></PixelFunctionCode>
+
+    <PixelFunctionArguments nodata="{NODATA_RAW}" max_valid="{MAX_VALID_RAW}" />
+
+    <SimpleSource>
+      <SourceFilename relativeToVRT="{a_rel}">{escape(a_xml_path)}</SourceFilename>
+      <SourceBand>{band_a}</SourceBand>
+      <SrcRect xOff="0" yOff="0" xSize="{xsize}" ySize="{ysize}" />
+      <DstRect xOff="0" yOff="0" xSize="{xsize}" ySize="{ysize}" />
+    </SimpleSource>
+
+    <SimpleSource>
+      <SourceFilename relativeToVRT="{b_rel}">{escape(b_xml_path)}</SourceFilename>
+      <SourceBand>{band_b}</SourceBand>
+      <SrcRect xOff="0" yOff="0" xSize="{xsize}" ySize="{ysize}" />
+      <DstRect xOff="0" yOff="0" xSize="{xsize}" ySize="{ysize}" />
+    </SimpleSource>
+  </VRTRasterBand>
+</VRTDataset>
+"""
+
+    out_vrt.write_text(vrt_xml, encoding="utf-8")
+    return out_vrt   
+
+
+def make_temporal_err_files():
+
+    from osgeo import gdal
+    gdal.UseExceptions()
+
+    chunks_dir = Path("temp.svalbard/filt/svalbard/chunks_3584/").absolute()
+    mosaic_dir = chunks_dir / "../mosaics_3584"
+    uncertainty_dir = Path("temp.svalbard/uncertainty").absolute()
+
+    temporal_err_vrt_dir = uncertainty_dir / "temporal_err_vrts/"
+    temporal_err_vrt_dir.mkdir(exist_ok=True, parents=True)
+    error_chunks = {}
+    for chunk_dir in chunks_dir.glob("chunk_*_*"):
+        if not chunk_dir.is_dir():
+            continue
+
+        for se_path in chunk_dir.glob("*_se.tif"):
+            product_name = se_path.stem.replace(chunk_dir.name + "_", "").replace("_se", "")
+            if not product_name.endswith("_accel"):
+                product_name += "_slope"
+
+            product_name_tcorr = product_name + "_tcorr"
+
+            for name in [product_name, product_name_tcorr]:
+                if name not in error_chunks:
+                    error_chunks[name] = []
+
+
+            tcorr_err_path = uncertainty_dir / f"chunks_3584/{chunk_dir.name}_{product_name}_tcorr_err.tif"
+
+            if tcorr_err_path.is_file():
+                vrt_path = temporal_err_vrt_dir / se_path.name.replace("_se.tif", "_temporal_err.vrt")
+                write_hypot_uint16_vrt(
+                    se_path,
+                    tcorr_err_path,
+                    vrt_path,
+                )
+                error_chunks[product_name_tcorr].append(vrt_path)
+            else:
+                error_chunks[product_name_tcorr].append(se_path)
+            error_chunks[product_name].append(se_path)
+
+    for product_name in error_chunks:
+
+        # If there's a prepared _tcorr list but it doesn't actually contain any tcorr information, skip it.
+        if "_tcorr" in product_name and not any(fp.suffix == ".vrt" for fp in error_chunks[product_name]):
+            continue
+
+        vrt_path = mosaic_dir / f"{product_name}_temporal_err.vrt"
+
+        gdal.BuildVRT(
+            str(vrt_path),
+            list(map(str, error_chunks[product_name])),
+        )
+        
+
+           
+        
 
 
 if __name__ == "__main__":

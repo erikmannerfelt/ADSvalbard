@@ -132,9 +132,9 @@ def apply_function(chunk_dir: Path, func, pred_col: str, var_cols: list[str], re
     # chunk_dir = get_chunks_dir() / f"chunk_{chunk_nr}"
     chunk_nr = chunk_dir.stem.replace("chunk_", "")
 
-    out_path = temp_dir / f"{chunk_dir.parts[-2]}/chunk_{chunk_nr}_{pred_col}_err.tif"
+    out_path = temp_dir / f"{chunk_dir.parts[-2]}/chunk_{chunk_nr}_{pred_col}_spatial_err.tif"
 
-    tcorr_err_path = out_path.with_stem(out_path.stem.replace("_err", "_tcorr_err"))
+    tcorr_err_path = out_path.with_stem(out_path.stem.replace("_spatial_err", "_tcorr_err"))
 
     #if tcorr_err_path.is_file():
     #    redo = True
@@ -151,8 +151,8 @@ def apply_function(chunk_dir: Path, func, pred_col: str, var_cols: list[str], re
     #     arrs = pd.DataFrame({pred_col:raster.read(1, masked=True).filled(np.nan).ravel()
 
     with rio.open(chunk_dir / f"chunk_{chunk_nr}_{se_col}.tif") as raster:
-        err = raster.read(1, masked=True)
-        err = (err.astype("float32") * raster.scales[0] + raster.offsets[0]).filled(np.nan).ravel()
+        # err = raster.read(1, masked=True)
+        # err = (err.astype("float32") * raster.scales[0] + raster.offsets[0]).filled(np.nan).ravel()
         # err = raster.read(1, masked=True).filled(np.nan).ravel()
         bounds = raster.bounds
         meta = raster.meta
@@ -185,14 +185,15 @@ def apply_function(chunk_dir: Path, func, pred_col: str, var_cols: list[str], re
                 arr = raster.read(1, masked=True, window=window, boundless=True)
                 arrs[key] = (arr * raster.scales[0] + raster.offsets[0]).filled(np.nan).ravel()
 
-    err = np.hypot(func(arrs), err)
+    # err = np.max([func(arrs), err], axis=0)
+    err = func(arrs)
 
-    if tcorr_err_path.is_file():
+    # if tcorr_err_path.is_file():
 
-        with rio.open(tcorr_err_path) as raster:
-            tcorr_err = (raster.read(1, masked=True).astype("float32") * raster.scales[0]).filled(0).ravel()
+    #     with rio.open(tcorr_err_path) as raster:
+    #         tcorr_err = (raster.read(1, masked=True).astype("float32") * raster.scales[0]).filled(0).ravel()
 
-        err = np.hypot(tcorr_err, err)
+    #     err = np.hypot(tcorr_err, err)
         # if "004_015" in tcorr_err_path.stem:
         #     import matplotlib.pyplot as plt
         #     plt.subplot(1, 3, 1)
@@ -717,7 +718,7 @@ def main(redo: bool = False):
                 print(f"Error on {chunk_dir}: {e}")
 
         gdal.BuildVRT(
-            str(Path("temp.svalbard/filt/svalbard/mosaics_3584") / f"{pred_col}_err.vrt"),
+            str(Path("temp.svalbard/filt/svalbard/mosaics_3584") / f"{pred_col}_spatial_err.vrt"),
             out_paths,
         )
 
@@ -1230,7 +1231,7 @@ def get_temporal_biascorr_uncertainty(verbose: bool = True, include_neff_standar
             print(meta)
 
             adsvalbard.mosaicking.write_formatted(
-                "slope_",  # This will trigger the same write profile as the slope rasters
+                "se_",  # This will trigger the same write profile as the standard error rasters
                 out_path,
                 err_d[*data_window.toslices()],
                 params=meta,
