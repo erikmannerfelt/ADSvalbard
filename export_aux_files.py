@@ -1,7 +1,16 @@
+#!/usr/bin/env python3
 import zipfile
 from pathlib import Path
 import io
 import itertools
+
+
+def build_exclusion_list(*paths: str) -> str:
+    titles: set[str] = set()
+    for path in paths:
+        titles.update(Path(path).read_text().splitlines())
+    return "\n".join(sorted(titles))
+
 
 def main():
     files = [
@@ -24,7 +33,7 @@ def main():
 
     inner_zips = {
         "vertcoreg_results.zip": io.BytesIO(),
-        "coreg_results.zip": io.BytesIO(),
+        "rigidcoreg_results.zip": io.BytesIO(),
     }
 
     with zipfile.ZipFile(inner_zips["vertcoreg_results.zip"], "w", compression=zipfile.ZIP_DEFLATED) as zip_file:
@@ -37,7 +46,7 @@ def main():
 
             
 
-    with zipfile.ZipFile(inner_zips["coreg_results.zip"], "w", compression=zipfile.ZIP_DEFLATED) as zip_file:
+    with zipfile.ZipFile(inner_zips["rigidcoreg_results.zip"], "w", compression=zipfile.ZIP_DEFLATED) as zip_file:
 
         for filepath in Path("temp.svalbard/arcticdem_coreg/").glob("*.json"):
             zip_file.write(filepath, filepath.name)
@@ -46,6 +55,15 @@ def main():
     with zipfile.ZipFile("temp.svalbard/aux_files.zip", "w", compression=zipfile.ZIP_DEFLATED, compresslevel=5) as zip_file:
         for filepath in map(Path, files):
             zip_file.write(filepath, filepath.name)
+
+        zip_file.writestr(
+            "excluded_dems_rigidcoreg.txt",
+            build_exclusion_list("temp.svalbard/bad_dems.txt", "temp.svalbard/bad_dems_dem.txt"),
+        )
+        zip_file.writestr(
+            "excluded_dems_vertcoreg.txt",
+            build_exclusion_list("temp.svalbard/bad_dems.txt", "temp.svalbard/bad_dems_dem_vertcoreg.txt"),
+        )
 
         for name in inner_zips:
             zip_file.writestr(name, inner_zips[name].getvalue())

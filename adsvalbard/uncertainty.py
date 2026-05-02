@@ -738,6 +738,17 @@ def patch_method_uncertainty():
         bounds = raster.bounds
         stable = raster.read(1, masked=True).filled(0) == 1
 
+    bad_pts = np.zeros_like(stable)
+    for filepath in ["temp/npi_curvature.vrt", "temp/npi_slope.tif"]:
+        scale = rio.open(filepath).scales[0]
+        with rio.open(filepath, overview_level=2) as raster:
+            arr = (raster.read(1, masked=True, boundless=True, window=rio.windows.from_bounds(*bounds, raster.transform)).astype("float32") * scale).filled(np.nan)
+        unstable_bounds = np.nanpercentile(arr[~stable], [1, 99])
+
+        bad_pts[(arr < unstable_bounds[0]) | (arr > unstable_bounds[1])] = True
+
+    stable = stable & (~bad_pts)
+
     for key in ["trend_2013-2018_slope", "trend_2019-2024_slope", "trend_2013-2024_slope"]:
         trend_path = Path(f"temp.svalbard/filt/svalbard/mosaics_3584/out/{key}.tif")
 
@@ -766,6 +777,12 @@ def patch_method_uncertainty():
 
         patches.to_csv(f"temp.svalbard/uncertainty/patch_method_{key}.csv", index=False)
 
+        # import matplotlib.pyplot as plt
+        # plt.title(key)
+        # plt.scatter(patches["exact_areas"], patches["nmad"])
+        # plt.xscale("log")
+        # plt.yscale("log")
+        # plt.show()
         print(patches)
 
     
