@@ -748,7 +748,7 @@ def main(verbose=True, n_points=10000, redo=False, random_seed=1):
     
     var_col = "trend_2013-2024_slope"
     cache_path = Path(f"temp.svalbard/uncertainty/vgm_sample_pts_{var_col}.arrow")
-    err_col = var_col.replace("_slope", "_slope_err")
+    err_col = var_col.replace("_slope", "_slope_baseline_err")
     # err_col = var_col + "_se"
 
     if cache_path.is_file() and not redo:
@@ -785,10 +785,10 @@ def main(verbose=True, n_points=10000, redo=False, random_seed=1):
         pts = pts.query("stable").copy()
 
 
-        print("Sampling elevation change")
-        pts[var_col] = adsvalbard.rasters.sample_raster(f"temp.svalbard/filt/svalbard/mosaics_3584/{var_col}.vrt", geometry=pts["geometry"])
-        pts[err_col] = adsvalbard.rasters.sample_raster(f"temp.svalbard/filt/svalbard/mosaics_3584/{err_col}.vrt", geometry=pts["geometry"])
-        pts.to_feather(cache_path)
+    print("Sampling elevation change")
+    pts[var_col] = adsvalbard.rasters.sample_raster(f"temp.svalbard/filt/svalbard/mosaics_3584/{var_col}.vrt", geometry=pts["geometry"])
+    pts[err_col] = adsvalbard.rasters.sample_raster(f"temp.svalbard/filt/svalbard/mosaics_3584/{err_col}.vrt", geometry=pts["geometry"])
+    pts.to_feather(cache_path)
 
     var_col = var_col
     original_var = pts[var_col].var()
@@ -811,6 +811,7 @@ def main(verbose=True, n_points=10000, redo=False, random_seed=1):
         bin_func=bins,
         n_jobs=1,
         random_state=random_seed,
+        estimator="dowd",
     )
 
 
@@ -818,7 +819,7 @@ def main(verbose=True, n_points=10000, redo=False, random_seed=1):
     variogram[["exp", "err_exp"]] *= exp_scale
     variogram.to_csv("temp.svalbard/uncertainty/empirical_variogram.csv")
 
-    vgm_model, params = xdem.spatialstats.fit_sum_model_variogram(["Sph", "Gaussian"], variogram)
+    vgm_model, params = xdem.spatialstats.fit_sum_model_variogram(["Sph", "Gaussian", "Gaussian"], variogram)
 
     params.to_csv("temp.svalbard/uncertainty/variogram_model.csv", index=False)
 
@@ -837,7 +838,7 @@ def main(verbose=True, n_points=10000, redo=False, random_seed=1):
     axes[1].plot(variogram.index, vgm_model(variogram.index), label="Variogram model", color="black")
     axes[1].errorbar(variogram.index, variogram["exp"], yerr=variogram["err_exp"], fmt="x", label="Empirical variogram", color="royalblue")
 
-    axes[1].set_ylim(0, vgm_model(variogram.index).max() * 1.25)
+    axes[1].set_ylim(1e-3, np.nanmax(vgm_model(variogram.index)) * 1.25)
     for r in params["range"].values:
         axes[1].vlines(r, *axes[1].get_ylim(), color="gray", linestyles="--")
         

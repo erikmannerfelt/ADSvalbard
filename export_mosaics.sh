@@ -8,6 +8,9 @@ out_dir="$base_dir/out"
 
 skip_vrt_patterns=(
   "*_se.vrt"
+  "*_spatial_err.vrt"
+  "*_temporal_err.vrt"
+  "*accel*"
 )
 
 declare -a failed_files=()
