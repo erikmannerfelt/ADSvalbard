@@ -25,6 +25,7 @@ def main():
         "temp.svalbard/uncertainty/vgm_neff_cirq.csv",
         "temp.svalbard/uncertainty/variogram_model.csv",
         "temp.svalbard/uncertainty/empirical_variogram.csv",
+        "temp.svalbard/point_timeseries_trends.csv",
         "temp.svalbard/chunk_outlines.geojson",
         "temp.svalbard/gap_model_importance_table.csv",
         "shapes/arcticdem_bad_patches.geojson",

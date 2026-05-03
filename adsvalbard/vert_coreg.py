@@ -11,7 +11,6 @@ import tqdm
 import tqdm.contrib.concurrent
 import json
 import tempfile
-from xml.sax.saxutils import escape
 
 from pathlib import Path
 from adsvalbard.constants import CONSTANTS

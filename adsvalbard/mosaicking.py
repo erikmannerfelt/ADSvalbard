@@ -1023,5 +1023,112 @@ def mosaic_all_tiles(chunksize: int = 512 * 7, n_workers: int | None = 8, redo =
         )
       
 
+def sample_point_timeseries_trends():
+    workdir = Path("temp.svalbard/filt/svalbard/mosaics_3584")
+    raster_ext = ".vrt"
+    csv_path = Path("temp.svalbard/point_timeseries_trends.csv")
+
+    points = [
+        (569452, 8691793, "Rabotbreen front"),
+        (539077, 8605225, "Doktorbreen surge"),
+        (667622, 8875455, "Austfonna summit"),
+        (448486, 8757319, "Kronebreen terminus retreat"),
+        (513015, 8579753, "Amundsenisen"),
+        (437100, 8825883, "Lilliehöökbreen accumulation area"),
+    ]
+
+    years = list(range(2013, 2025))
+    dem_products = ["dem", "count", "doy", "nmad"]
+    trend_intervals = ["2013-2018", "2019-2024", "2013-2024"]
+    trend_products = ["slope", "intercept", "slope_fit_err", "slope_baseline_err"]
+
+    quality_labels = {
+        1: "q95",
+        2: "q75",
+        3: "bias",
+        4: "vertcorr",
+    }
+
+    def decode_value(dataset: rio.io.DatasetReader, raw: np.ndarray | float) -> np.ndarray | float:
+        scale = dataset.scales[0] if dataset.scales else 1.0
+        offset = dataset.offsets[0] if dataset.offsets else 0.0
+        nodata = dataset.nodata
+        arr = np.asarray(raw, dtype=np.float64)
+        if nodata is not None:
+            arr = np.where(arr == nodata, np.nan, arr)
+        arr = arr * scale + offset
+        if np.isscalar(raw):
+            return float(arr)
+        return arr
+
+    def read_point_value(path: Path, x: float, y: float) -> float:
+        with rio.open(path) as ds:
+            row, col = ds.index(x, y)
+            raw = ds.read(1, window=((row, row + 1), (col, col + 1)), masked=False)[0, 0]
+            return float(decode_value(ds, raw))
+
+    def sample_point_series(x: float, y: float):
+        records = []
+        for year in years:
+            rec = {"year": year}
+            for product in dem_products:
+                path = workdir / f"dem_{year}_{product}{raster_ext}"
+                rec[product] = read_point_value(path, x, y)
+            rec["x"] = year + (rec["doy"] - 1.0) / 365.25
+            records.append(rec)
+        return records
+
+    def trend_product_name(interval: str, product: str) -> str:
+        if interval == "2019-2024" and product == "slope":
+            return "slope_tcorr"
+        if interval == "2019-2024" and product == "slope_fit_err":
+            return "slope_tcorr_fit_err"
+        return product
+
+    def sample_trends(x: float, y: float):
+        out = {}
+        for interval in trend_intervals:
+            for product in trend_products:
+                raster_product = trend_product_name(interval, product)
+                path = workdir / f"trend_{interval}_{raster_product}{raster_ext}"
+                out.setdefault(interval, {})[product] = read_point_value(path, x, y)
+        return out
+
+    def sample_point_row(x: float, y: float, label: str) -> dict:
+        quality_raw = read_point_value(workdir / f"dem_quality_mode{raster_ext}", x, y)
+        quality = quality_labels.get(int(round(quality_raw)), f"unknown({quality_raw})")
+        series = sample_point_series(x, y)
+        trends = sample_trends(x, y)
+
+        row = {
+            "label": label,
+            "x": x,
+            "y": y,
+            "quality_mode": quality,
+        }
+        for year_rec in series:
+            year = year_rec["year"]
+            row[f"{year}_dem"] = year_rec["dem"]
+            row[f"{year}_nmad"] = year_rec["nmad"]
+            row[f"{year}_count"] = year_rec["count"]
+            row[f"{year}_doy"] = year_rec["doy"]
+        for interval in trend_intervals:
+            trend = trends[interval]
+            row[f"{interval}_slope"] = trend["slope"]
+            row[f"{interval}_intercept"] = trend["intercept"]
+            row[f"{interval}_fit_err"] = trend["slope_fit_err"]
+            row[f"{interval}_baseline_err"] = trend["slope_baseline_err"]
+        return row
+
+    rows = [sample_point_row(x, y, label) for x, y, label in points]
+    columns = ["label", "x", "y", "quality_mode"]
+    for year in years:
+        columns.extend([f"{year}_dem", f"{year}_nmad", f"{year}_count", f"{year}_doy"])
+    for interval in trend_intervals:
+        columns.extend([f"{interval}_slope", f"{interval}_intercept", f"{interval}_fit_err", f"{interval}_baseline_err"])
+
+    pd.DataFrame.from_records(rows).reindex(columns=columns).to_csv(csv_path, index=False, na_rep="")
+
+
 if __name__ == "__main__":
     mosaic_all_tiles()
