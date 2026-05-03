@@ -1030,7 +1030,7 @@ def sample_point_timeseries_trends():
 
     points = [
         (569452, 8691793, "Rabotbreen front"),
-        (539077, 8605225, "Doktorbreen surge"),
+        (540096, 8606071, "Doktorbreen surge"),
         (667622, 8875455, "Austfonna summit"),
         (448486, 8757319, "Kronebreen terminus retreat"),
         (513015, 8579753, "Amundsenisen"),
