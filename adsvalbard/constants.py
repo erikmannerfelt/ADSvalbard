@@ -1,6 +1,13 @@
 from pathlib import Path
 
-import projectfiles
+try:
+    import projectfiles
+except ModuleNotFoundError:
+    class _ConstantBase:
+        pass
+
+    class projectfiles:
+        Constant = _ConstantBase
 
 
 class Constants(projectfiles.Constant):

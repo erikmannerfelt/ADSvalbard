@@ -407,13 +407,7 @@ def load_and_mosaic_dem(chunk_nr: str, chunksize: int, year: int, return_uncorr:
         "uncorr": uncorr_dem,
     }
 
-def write_formatted(key, fp, arr, params, verbose: bool = True, redo: bool = False):
-    shape = params["height"], params["width"]
-
-    if fp.is_file() and not redo:
-        return
-
-    fp.parent.mkdir(exist_ok=True, parents=True)
+def prepare_formatted_array(key, arr):
     scale = 1
     offset = 0
     nodata = -9999.
@@ -436,7 +430,7 @@ def write_formatted(key, fp, arr, params, verbose: bool = True, redo: bool = Fal
         arr = np.where(
             np.isfinite(arr),
             np.clip((arr * (umax / vmax)), a_min=0, a_max=umax),
-            umax + 1
+            umax + 1,
         ).astype("uint16")
         scale = vmax / umax
         nodata = umax + 1
@@ -446,7 +440,7 @@ def write_formatted(key, fp, arr, params, verbose: bool = True, redo: bool = Fal
         arr = np.where(
             np.isfinite(arr),
             np.clip(((arr + 1) * (umax / 2.)), a_min=0, a_max=umax),
-            umax + 1
+            umax + 1,
         ).astype("uint8")
         scale = 2. / umax
         nodata = umax + 1
@@ -467,6 +461,18 @@ def write_formatted(key, fp, arr, params, verbose: bool = True, redo: bool = Fal
     if arr.dtype == "float64":
         arr = arr.astype("float32")
 
+    return arr, scale, offset, nodata
+
+
+def write_formatted(key, fp, arr, params, verbose: bool = True, redo: bool = False):
+    shape = params["height"], params["width"]
+
+    if fp.is_file() and not redo:
+        return
+
+    fp.parent.mkdir(exist_ok=True, parents=True)
+    arr, scale, offset, nodata = prepare_formatted_array(key, arr)
+
     meta = params | {
         "height": shape[0],
         "width": shape[1],
@@ -484,13 +490,6 @@ def write_formatted(key, fp, arr, params, verbose: bool = True, redo: bool = Fal
     else:
         meta["predictor"] = 2
 
-    # if meta["dtype"] == "uint8":
-    #     meta["nodata"] = 0
-    # elif meta["dtype"] == "uint16":
-    #     meta["nodata"] = 65535
-
-
-    # print(key, meta)
     if verbose:
         print(f"Writing {fp}")
     tmp_fp = fp.with_suffix(".tmp")
@@ -1027,14 +1026,18 @@ def sample_point_timeseries_trends():
     workdir = Path("temp.svalbard/filt/svalbard/mosaics_3584")
     raster_ext = ".vrt"
     csv_path = Path("temp.svalbard/point_timeseries_trends.csv")
+    xy_path = csv_path.with_name(csv_path.name.replace(".csv", "_points.geojson"))
 
     points = [
-        (569452, 8691793, "Rabotbreen front"),
-        (540096, 8606071, "Doktorbreen surge"),
-        (667622, 8875455, "Austfonna summit"),
-        (448486, 8757319, "Kronebreen terminus retreat"),
-        (513015, 8579753, "Amundsenisen"),
-        (437100, 8825883, "Lilliehöökbreen accumulation area"),
+        (569452, 8691793, "Rabotbreen front", "rabotbreen"),
+        # (540096, 8606071, "Doktorbreen surge"),
+        # (667622, 8875455, "Austfonna summit"),
+        (448450, 8757319, "Kronebreen terminus retreat", "kronebreen_terminus"),
+        # (513015, 8579753, "Amundsenisen"),
+        (437100, 8825883, "Lilliehöökbreen accumulation area", "lilliehook_acc"),
+        (570000, 8733400, "Negribreen central body", "negribreen_central"),
+        (680684, 8895978, "Austfonna north", "austfonna_north"),
+        (526363, 8570356, "Storbreen accumulation area", "storbreen_acc"),
     ]
 
     years = list(range(2013, 2025))
@@ -1094,7 +1097,7 @@ def sample_point_timeseries_trends():
                 out.setdefault(interval, {})[product] = read_point_value(path, x, y)
         return out
 
-    def sample_point_row(x: float, y: float, label: str) -> dict:
+    def sample_point_row(x: float, y: float, label: str, key: str) -> dict:
         quality_raw = read_point_value(workdir / f"dem_quality_mode{raster_ext}", x, y)
         quality = quality_labels.get(int(round(quality_raw)), f"unknown({quality_raw})")
         series = sample_point_series(x, y)
@@ -1104,6 +1107,7 @@ def sample_point_timeseries_trends():
             "label": label,
             "x": x,
             "y": y,
+            "key": key,
             "quality_mode": quality,
         }
         for year_rec in series:
@@ -1120,14 +1124,18 @@ def sample_point_timeseries_trends():
             row[f"{interval}_baseline_err"] = trend["slope_baseline_err"]
         return row
 
-    rows = [sample_point_row(x, y, label) for x, y, label in points]
-    columns = ["label", "x", "y", "quality_mode"]
+    rows = [sample_point_row(x, y, label, key) for x, y, label, key in points]
+    columns = ["label", "x", "y", "key", "quality_mode"]
     for year in years:
         columns.extend([f"{year}_dem", f"{year}_nmad", f"{year}_count", f"{year}_doy"])
     for interval in trend_intervals:
         columns.extend([f"{interval}_slope", f"{interval}_intercept", f"{interval}_fit_err", f"{interval}_baseline_err"])
 
     pd.DataFrame.from_records(rows).reindex(columns=columns).to_csv(csv_path, index=False, na_rep="")
+
+    pts = pd.DataFrame(points, columns=["x", "y", "name", "key"])
+    pts = gpd.GeoDataFrame(pts, geometry=gpd.points_from_xy(pts["x"], pts["y"], crs=32633))
+    pts.to_file(xy_path)
 
 
 if __name__ == "__main__":
