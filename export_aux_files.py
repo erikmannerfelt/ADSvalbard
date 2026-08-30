@@ -28,7 +28,10 @@ def main():
         "temp.svalbard/point_timeseries_trends.csv",
         "temp.svalbard/point_timeseries_trends_points.geojson",
         "temp.svalbard/chunk_outlines.geojson",
-        "temp.svalbard/gap_model_importance_table.csv",
+        "temp.svalbard/gap_model_grouped_cv_scores_by_fold.csv",
+        "temp.svalbard/gap_model_grouped_cv_scores_summary.csv",
+        "temp.svalbard/gap_model_grouped_cv_importance_by_fold.csv",
+        "temp.svalbard/gap_model_grouped_cv_importance_summary.csv",
         "shapes/arcticdem_bad_patches.geojson",
         "shapes/bad_coreg_regions.geojson",
     ]

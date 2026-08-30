@@ -2,6 +2,7 @@ import pickle
 import time
 import typing
 import warnings
+from dataclasses import dataclass
 from pathlib import Path
 
 import geopandas as gpd
@@ -505,6 +506,229 @@ class GapModel:
             f"Model: {self.model}, score: {self.score:.3f}\n"
             f"Training checksum: {self.training_checksum[:8]}..."
         )
+
+
+@dataclass(frozen=True)
+class GroupedCVResult:
+    """Results of patch-grouped cross-validation for the gap-detection model.
+
+    This evaluates the *modeling procedure* used by `GapModel.train()`, not the exact
+    fitted model that produced the outlier rasters currently on disk. `GapModel.default()`
+    and its cached predictions are untouched by this evaluation; see
+    `evaluate_gap_model_grouped()` for why the two need to be kept separate.
+
+    Attributes
+    ----------
+    fold_scores
+        One row per fold: classification metrics plus train/test group- and
+        class-balance diagnostics.
+    summary_scores
+        Mean and std of each metric in `fold_scores`, aggregated across folds.
+    fold_importance
+        One row per (fold, feature): permutation importance mean/std within that
+        fold's held-out subsample.
+    summary_importance
+        Mean and std of the per-fold importance mean, aggregated across folds.
+        Indexed by feature name, matching the shape of `GapModel.importance`.
+    """
+
+    fold_scores: pd.DataFrame
+    summary_scores: pd.DataFrame
+    fold_importance: pd.DataFrame
+    summary_importance: pd.DataFrame
+
+
+def evaluate_gap_model_grouped(
+    all_patches: pd.DataFrame,
+    n_splits: int = 5,
+    importance_sample_size: int = 200_000,
+    importance_n_repeats: int = 10,
+    random_state: int = 0,
+    save_csv: bool = True,
+    output_dir: Path = Path("temp.svalbard"),
+) -> GroupedCVResult:
+    """Evaluate the gap-detection modeling procedure with patch-grouped cross-validation.
+
+    `GapModel.train()` evaluates a single point-level `train_test_split`, which lets
+    pixels from the same labelled polygon (`patch_id`) land in both the training and
+    testing sets. Because pixels within a polygon are spatially correlated, this leaks
+    information and produces overly optimistic scores.
+
+    This function instead uses `StratifiedGroupKFold`, keeping every pixel of a given
+    `patch_id` in the same fold, and reports mean +/- std across folds rather than a
+    single score from one arbitrary polygon partition.
+
+    In the labelled data, almost every patch is homogeneously "bad" or "good" (the
+    per-pixel label is effectively a per-patch label), and patch sizes are highly skewed
+    (tens to hundreds of thousands of pixels for the largest patches). Plain `GroupKFold`
+    can therefore leave some folds with a very different bad/good ratio than others;
+    `StratifiedGroupKFold` balances the class ratio across folds while still keeping
+    patches intact.
+
+    This is a standalone evaluation, not a method on `GapModel`: it has a different output
+    shape (per-fold scores/importances vs. a single fitted model) and a different purpose
+    (estimating how well the procedure generalizes to unseen patches, vs. producing the
+    deployed model artifact). It does not read or write the `GapModel` pickle cache, and
+    does not affect `create_gap_mask()` / `generate_all_masks()`.
+
+    Parameters
+    ----------
+    all_patches
+        Labelled per-pixel training data, as returned by `get_bad_patch_stats()`. Must
+        contain `patch_id`, `bad`, `exact`, and the feature columns used by `GapModel`.
+    n_splits
+        Number of grouped CV folds.
+    importance_sample_size
+        Maximum number of held-out rows per fold used for permutation importance, to
+        bound runtime regardless of fold size (folds range from ~1k to several million
+        rows). The full fold is used if it is smaller than this.
+    importance_n_repeats
+        Number of shuffle repeats per feature in
+        `sklearn.inspection.permutation_importance`.
+    random_state
+        Seed for the fold splitter and the importance subsampling. The classifier itself
+        is always seeded with `random_state=0`, matching `GapModel.train()`.
+    save_csv
+        Whether to write the four result tables as CSVs under `output_dir`.
+    output_dir
+        Directory the CSVs are written to when `save_csv` is True.
+
+    Returns
+    -------
+    A `GroupedCVResult` with per-fold and aggregated scores and permutation importances.
+    """
+    import sklearn.inspection
+    import sklearn.metrics
+    import sklearn.model_selection
+
+    all_patches = all_patches[all_patches["exact"]]
+    all_patches = all_patches.dropna(how="all", axis="columns")
+
+    bad_vs_good_frac = all_patches["bad"].sum() / all_patches.shape[0]
+    print(
+        f"{bad_vs_good_frac * 100:.2f}% of values are flagged as bad. The rest are good."
+    )
+
+    x_cols = ["gap_distance", "npi_dh", "npi_dt", "median_dem"] + [
+        str(col) for col in all_patches if "quadric_" in col
+    ]
+    y_col = "bad"
+
+    features = all_patches[x_cols]
+    labels = all_patches[y_col]
+    groups = all_patches["patch_id"]
+
+    splitter = sklearn.model_selection.StratifiedGroupKFold(
+        n_splits=n_splits, shuffle=True, random_state=random_state
+    )
+    rng = np.random.default_rng(random_state)
+
+    score_rows = []
+    importance_frames = []
+
+    for fold, (train_idx, test_idx) in tqdm(
+        enumerate(splitter.split(features, labels, groups=groups)),
+        total=n_splits,
+        desc="Grouped CV",
+        smoothing=0.0,
+    ):
+        x_train, x_test = features.iloc[train_idx], features.iloc[test_idx]
+        y_train, y_test = labels.iloc[train_idx], labels.iloc[test_idx]
+
+        model = sklearn.ensemble.HistGradientBoostingClassifier(random_state=0)
+        model.fit(x_train, y_train)
+
+        y_pred = model.predict(x_test)
+        tn, fp, fn, tp = sklearn.metrics.confusion_matrix(
+            y_test, y_pred, labels=[False, True]
+        ).ravel()
+
+        precision = tp / (tp + fp) if (tp + fp) > 0 else np.nan
+        recall = tp / (tp + fn) if (tp + fn) > 0 else np.nan
+        specificity = tn / (tn + fp) if (tn + fp) > 0 else np.nan
+        fnr = fn / (fn + tp) if (fn + tp) > 0 else np.nan
+        fpr = fp / (fp + tn) if (fp + tn) > 0 else np.nan
+        f1 = (
+            2 * precision * recall / (precision + recall)
+            if (precision + recall) > 0
+            else np.nan
+        )
+
+        score_rows.append(
+            {
+                "fold": fold,
+                "n_train": x_train.shape[0],
+                "n_test": x_test.shape[0],
+                "n_patches_train": groups.iloc[train_idx].nunique(),
+                "n_patches_test": groups.iloc[test_idx].nunique(),
+                "frac_bad_train": float(y_train.mean()),
+                "frac_bad_test": float(y_test.mean()),
+                "accuracy": sklearn.metrics.accuracy_score(y_test, y_pred),
+                "precision": precision,
+                "recall": recall,
+                "specificity": specificity,
+                "f1": f1,
+                "fnr": fnr,
+                "fpr": fpr,
+            }
+        )
+
+        sample_size = min(importance_sample_size, x_test.shape[0])
+        sample_idx = rng.choice(x_test.shape[0], size=sample_size, replace=False)
+
+        importance = sklearn.inspection.permutation_importance(
+            model,
+            x_test.iloc[sample_idx],
+            y_test.iloc[sample_idx],
+            n_repeats=importance_n_repeats,
+            random_state=random_state,
+            n_jobs=-1,
+        )
+        importance_frames.append(
+            pd.DataFrame(
+                {
+                    "fold": fold,
+                    "name": model.feature_names_in_,
+                    "importance_mean": importance.importances_mean,
+                    "importance_std": importance.importances_std,
+                }
+            )
+        )
+
+    fold_scores = pd.DataFrame(score_rows).set_index("fold")
+
+    metric_cols = ["accuracy", "precision", "recall", "specificity", "f1", "fnr", "fpr"]
+    summary_scores = fold_scores[metric_cols].agg(["mean", "std"]).T
+    summary_scores.columns = ["mean", "std"]
+
+    fold_importance = pd.concat(importance_frames, ignore_index=True)
+    summary_importance = fold_importance.groupby("name")["importance_mean"].agg(
+        ["mean", "std"]
+    )
+
+    result = GroupedCVResult(
+        fold_scores=fold_scores,
+        summary_scores=summary_scores,
+        fold_importance=fold_importance,
+        summary_importance=summary_importance,
+    )
+
+    if save_csv:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        result.fold_scores.to_csv(
+            output_dir / "gap_model_grouped_cv_scores_by_fold.csv"
+        )
+        result.summary_scores.to_csv(
+            output_dir / "gap_model_grouped_cv_scores_summary.csv"
+        )
+        result.fold_importance.to_csv(
+            output_dir / "gap_model_grouped_cv_importance_by_fold.csv", index=False
+        )
+        result.summary_importance.to_csv(
+            output_dir / "gap_model_grouped_cv_importance_summary.csv"
+        )
+
+    return result
 
 
 def make_gap_mask_name(filename: str, parent: Path | None = None) -> Path:
