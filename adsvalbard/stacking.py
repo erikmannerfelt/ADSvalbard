@@ -1,3 +1,4 @@
+import datetime
 import json
 import shutil
 import warnings
@@ -807,7 +808,7 @@ def process_chunk(filepath: Path, input_filepaths: dict[Path, threading.Lock], o
 
             date_str = path.stem.split("_")[3]
             year = date_str[:4]
-            doy = int(date_str[4:6]) * 30 + int(date_str[6:])
+            doy = datetime.date(int(year), int(date_str[4:6]), int(date_str[6:8])).timetuple().tm_yday
             outlier_proba_path = outlier_proba_dir / f"{year}/{path.stem}_outlier_proba.tif"
 
             doys.append(

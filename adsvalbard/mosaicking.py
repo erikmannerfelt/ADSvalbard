@@ -324,7 +324,7 @@ def load_and_mosaic_dem(chunk_nr: str, chunksize: int, year: int, return_uncorr:
         dem = np.full(quality_flag.shape, np.nan, dtype=raster.dtypes[0])
         nmad = dem.copy()
         count = quality_flag.copy() - 1
-        doy = quality_flag.copy().astype("uint16")
+        doy = np.zeros(quality_flag.shape, dtype="uint16")
         xy_coords = np.dstack(np.meshgrid(np.linspace(raster.bounds.left, raster.bounds.right, raster.width), np.linspace(raster.bounds.bottom, raster.bounds.top, raster.height)[::-1])).reshape((-1, 2))
 
     ocean = read_coastline(year=str(year), meta=meta)
