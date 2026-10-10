@@ -1022,10 +1022,16 @@ def mosaic_all_tiles(chunksize: int = 512 * 7, n_workers: int | None = 8, redo =
         )
       
 
-def sample_point_timeseries_trends():
-    workdir = Path("temp.svalbard/filt/svalbard/mosaics_3584")
-    raster_ext = ".vrt"
-    csv_path = Path("temp.svalbard/point_timeseries_trends.csv")
+def sample_point_timeseries_trends(
+    workdir: Path = Path("temp.svalbard/filt/svalbard/mosaics_3584/out"),
+    csv_path: Path = Path("temp.svalbard/point_timeseries_trends.csv"),
+):
+    """Sample the exported rasters at a few points for the time-series figure.
+
+    Reads the exported GeoTIFFs (``export_mosaics.sh``, release names) after the DOY
+    repair (``adsvalbard.doy``), not the internal VRTs, whose DOY band is legacy-encoded.
+    """
+    raster_ext = ".tif"
     xy_path = csv_path.with_name(csv_path.name.replace(".csv", "_points.geojson"))
 
     points = [
@@ -1081,19 +1087,11 @@ def sample_point_timeseries_trends():
             records.append(rec)
         return records
 
-    def trend_product_name(interval: str, product: str) -> str:
-        if interval == "2019-2024" and product == "slope":
-            return "slope_tcorr"
-        if interval == "2019-2024" and product == "slope_fit_err":
-            return "slope_tcorr_fit_err"
-        return product
-
     def sample_trends(x: float, y: float):
         out = {}
         for interval in trend_intervals:
             for product in trend_products:
-                raster_product = trend_product_name(interval, product)
-                path = workdir / f"trend_{interval}_{raster_product}{raster_ext}"
+                path = workdir / f"trend_{interval}_{product}{raster_ext}"
                 out.setdefault(interval, {})[product] = read_point_value(path, x, y)
         return out
 

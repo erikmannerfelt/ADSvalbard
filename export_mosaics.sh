@@ -45,6 +45,21 @@ move_with_sidecars() {
     done
 }
 
+# The temporally corrected 2019-2024 trend is the leading product, so it is exported
+# without suffix and the uncorrected one gets "_uncorr". Outputs exported before
+# 2026-10-09 used the internal names; rename those by hand once (the existence check
+# below would otherwise mistake the old uncorrected trend_2019-2024_slope.tif for the
+# corrected one).
+release_name() {
+    case "$1" in
+        trend_2019-2024_slope) echo "trend_2019-2024_slope_uncorr" ;;
+        trend_2019-2024_slope_fit_err) echo "trend_2019-2024_slope_uncorr_fit_err" ;;
+        trend_2019-2024_slope_tcorr) echo "trend_2019-2024_slope" ;;
+        trend_2019-2024_slope_tcorr_fit_err) echo "trend_2019-2024_slope_fit_err" ;;
+        *) echo "$1" ;;
+    esac
+}
+
 should_skip_vrt() {
     local vrt_path="$1"
     local vrt_name
@@ -73,7 +88,7 @@ for vrt_file in "${vrt_files[@]}"; do
         continue
     fi
 
-    tif_file="$out_dir/$(basename -- "${vrt_file%.vrt}").tif"
+    tif_file="$out_dir/$(release_name "$(basename -- "${vrt_file%.vrt}")").tif"
 
     # 1) Skip files that already exist
     if [[ -e "$tif_file" ]]; then
