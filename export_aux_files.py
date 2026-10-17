@@ -4,6 +4,8 @@ from pathlib import Path
 import io
 import itertools
 
+import adsvalbard.vert_coreg
+
 
 def build_exclusion_list(*paths: str) -> str:
     titles: set[str] = set()
@@ -13,6 +15,9 @@ def build_exclusion_list(*paths: str) -> str:
 
 
 def main():
+    # Written here rather than during co-registration; see its docstring
+    adsvalbard.vert_coreg.summarize_vertcoreg_support()
+
     files = [
         "temp.svalbard/uncertainty/binned_terrain_err_trend_2013-2018_slope.csv",
         "temp.svalbard/uncertainty/binned_terrain_err_trend_2013-2024_slope.csv",
@@ -32,6 +37,7 @@ def main():
         "temp.svalbard/gap_model_grouped_cv_scores_summary.csv",
         "temp.svalbard/gap_model_grouped_cv_importance_by_fold.csv",
         "temp.svalbard/gap_model_grouped_cv_importance_summary.csv",
+        "temp.svalbard/vertcoreg_support.csv",
         "shapes/arcticdem_bad_patches.geojson",
         "shapes/bad_coreg_regions.geojson",
     ]

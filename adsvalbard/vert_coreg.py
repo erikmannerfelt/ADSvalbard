@@ -468,6 +468,71 @@ def get_vertcoreg_region_bounds() -> dict[str, "rio.coords.BoundingBox"]:
     # }[label]
 
 
+def summarize_vertcoreg_support(
+    sample_pts_dir: Path = Path("tmp"),
+    out_path: Path = Path("temp.svalbard/vertcoreg_support.csv"),
+    years: range = range(2013, 2025),
+) -> pd.DataFrame:
+    """Summarize how much stable terrain anchored each regional deramping.
+
+    `coregister_vert_year` samples points over land in a box around each region (the
+    chunks touching it), so the share of sample points off glaciers describes the box
+    rather than the region. This counts, per region and year, the stable points in the
+    whole box and inside the manually delineated region itself, and how many of them
+    are covered by at least one of that year's accepted strips.
+
+    The sample points are identical every year (fixed seed and outlines), so only the
+    2013 set written by `coregister_vert_year` is read
+    (``tmp/vertcoreg_sample_pts_2013__{label}.arrow``). Strip coverage is taken from
+    the strip footprints, which follow the valid-data outline but include small
+    internal gaps, so the covered counts are slight upper bounds.
+
+    Returns
+    -------
+    One row per region and year, with point counts (``n_*``) and ``n_strips`` (strips
+    intersecting the region). The result is also written to `out_path`.
+    """
+    strips = gpd.read_feather("temp.svalbard/strip-meta.feather")
+    strips["year"] = pd.to_datetime(strips["datetime"]).dt.year
+    # The same exclusions as in coregister_vert_year
+    bad_titles = set(Path("temp.svalbard/bad_dems.txt").read_text().splitlines())
+    bad_titles |= set(Path("temp.svalbard/bad_dems_dem_vertcoreg.txt").read_text().splitlines())
+    strips = strips[~strips["title"].isin(bad_titles)]
+    regions = gpd.read_file("shapes/bad_coreg_regions.geojson").to_crs(strips.crs).set_index("label")
+
+    rows = []
+    for filepath in sorted(sample_pts_dir.glob(f"vertcoreg_sample_pts_{years[0]}__*.arrow")):
+        # The label is stored with a leading "_", hence the double underscore
+        label = filepath.stem.split("__")[1]
+        region = regions.loc[label, "geometry"]
+        points = gpd.read_feather(filepath).to_crs(strips.crs)
+        stable = points["stable"].to_numpy(dtype=bool)
+        in_region = points.within(region).to_numpy()
+
+        for year in years:
+            year_strips = strips.loc[strips["year"] == year, ["geometry"]]
+            covering = gpd.sjoin(points[["geometry"]], year_strips, how="inner", predicate="within")
+            covered = points.index.isin(covering.index)
+            rows.append(
+                {
+                    "year": year,
+                    "vertcoreg_zone": label,
+                    "n_strips": int(year_strips.intersects(region).sum()),
+                    "n_points": len(points),
+                    "n_stable": int(stable.sum()),
+                    "n_stable_covered": int((stable & covered).sum()),
+                    "n_points_in_region": int(in_region.sum()),
+                    "n_stable_in_region": int((stable & in_region).sum()),
+                    "n_stable_in_region_covered": int((stable & in_region & covered).sum()),
+                }
+            )
+
+    summary = pd.DataFrame(rows).sort_values(["vertcoreg_zone", "year"])
+    out_path.parent.mkdir(exist_ok=True, parents=True)
+    summary.to_csv(out_path, index=False)
+    return summary
+
+
 
 def main(n_points: int = 5000, verbose: bool = True):
 
