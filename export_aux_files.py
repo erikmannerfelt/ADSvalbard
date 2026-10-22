@@ -55,13 +55,10 @@ def main():
 
             zip_file.write(filepath, filepath.name)
 
-            
-
     with zipfile.ZipFile(inner_zips["rigidcoreg_results.zip"], "w", compression=zipfile.ZIP_DEFLATED) as zip_file:
 
         for filepath in Path("temp.svalbard/arcticdem_coreg/").glob("*.json"):
             zip_file.write(filepath, filepath.name)
-
 
     with zipfile.ZipFile("temp.svalbard/aux_files.zip", "w", compression=zipfile.ZIP_DEFLATED, compresslevel=5) as zip_file:
         for filepath in map(Path, files):
@@ -78,8 +75,7 @@ def main():
 
         for name in inner_zips:
             zip_file.writestr(name, inner_zips[name].getvalue())
-    
 
-          
+
 if __name__ == "__main__":
     main()

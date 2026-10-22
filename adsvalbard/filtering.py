@@ -59,9 +59,6 @@ def get_bad_patch_stats(
     A very big dataframe of labelled data to use for training/testing.
 
     """
-    # patch_polygs = gpd.read_file("shapes/arcticdem_bad_patches.geojson")
-
-    # checksum = adsvalbard.utilities.get_checksum([patch_polygs])
 
     patch_polygs, checksum = get_patch_polygs()
     cache_filepath = (
@@ -85,8 +82,6 @@ def get_bad_patch_stats(
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message=".*'nopython' keyword.*")
         import xdem
-
-    # patch_id = 0
 
     all_data = []
     with tqdm(
@@ -120,15 +115,10 @@ def get_bad_patch_stats(
                 crs=dem.crs,
             )
 
-            # tree = scipy.spatial.KDTree(np.transpose([coord[dem.data.mask] for coord in get_eastings_northings(dem.bounds, *dem.shape)]))
-
-            # distance_field = tree.query(np.transpose([eastings.ravel(), northings.ravel()]), workers=-1)[0].reshape(eastings.shape)
-
             per_filepath = []
 
             progress_bar.set_description("Getting patch stats")
             for _, patch in file_data.iterrows():
-                # print(patch)
 
                 # Crop the DEM to the patch, plus a buffer
                 try:
@@ -181,19 +171,13 @@ def get_bad_patch_stats(
                 flagged = np.ones(in_patch_mask.shape, dtype=int)
                 # For "bad"-type patches, generate points outside of the patch and classify them as good
                 if patch["type"] == "bad" and add_extra:
-                    # coords_in_patch = np.transpose([coord[in_patch_mask] for coord in [eastings, northings]])
 
-                    # Get the distances to a gap of the values in the patch
-                    # gap_distances_in_patch = tree.query(coords_in_patch)[0]
                     gap_distances_in_patch = dist_sub.data[in_patch_mask]
                     dist_bins = np.linspace(
                         gap_distances_in_patch.min(),
                         gap_distances_in_patch.max(),
                         num=11,
                     )
-
-                    # Calculate distances for every pixel in order to find matching training points outside of the patch
-                    # distance_field = tree.query(np.transpose([eastings.ravel(), northings.ravel()]), workers=-1)[0].reshape(eastings.shape)
 
                     # Initialize an index array. Extra point (pixel) indices will be added here
                     extra_points = np.empty((0,), dtype=int)
@@ -239,7 +223,6 @@ def get_bad_patch_stats(
 
                 data = gpd.GeoDataFrame(
                     {
-                        # "gap_distance": #tree.query(coords_sub)[0],
                         "bad": (flagged[in_patch_mask] == 1)
                         if (patch["type"] == "bad")
                         else np.zeros_like(flagged, dtype=bool)[in_patch_mask],
@@ -271,13 +254,6 @@ def get_bad_patch_stats(
 
             # Concatenate all patch data for this filepath, and then sample the final values.
             per_filepath = pd.concat(per_filepath)
-
-            # progress_bar.set_description("Reading rasters")
-            # for key, filepath in [("median_dem", median_path), ("npi_dt", dt_path), ("npi_dh", dh_path)]:
-
-            #     with rasterio.open(filepath) as raster, warnings.catch_warnings():
-            #         warnings.filterwarnings("ignore", message=".*converting a masked element to nan.*")
-            #         per_filepath[key] = np.fromiter(raster.sample(np.transpose([per_filepath["geometry"].x, per_filepath["geometry"].y]), masked=True), count=per_filepath.shape[0], dtype=raster.dtypes[0])
 
             all_data.append(per_filepath)
 
@@ -313,7 +289,6 @@ class GapModel:
     def train(cls, force_redo: bool = False) -> typing.Self:
         _, checksum = get_patch_polygs()
         all_patches = get_bad_patch_stats(force_redo=force_redo)
-        # all_patches = pd.read_feather("cache/get_bad_patch_stats/get_bad_patch_stats-5e56d0a7b7ccbb9b96412219d2c4169d4efc026fd300b38c74e2a1dba9965faf.feather")
         all_patches = all_patches[all_patches["exact"]]
         bad_vs_good_frac = (
             all_patches[all_patches["bad"]].shape[0] / all_patches.shape[0]
@@ -334,39 +309,23 @@ class GapModel:
         x_cols = ["gap_distance", "npi_dh", "npi_dt", "median_dem"] + [
             str(col) for col in all_patches if "quadric_" in col
         ]
-        # x_cols = ["dem", "slope", "curvature", "npi_dh"]
         y_col = "bad"
-        # all_patches = all_patches.dropna(subset=x_cols)
 
         xtrain, xtest, ytrain, ytest = sklearn.model_selection.train_test_split(
             all_patches[x_cols], all_patches[y_col], random_state=0
         )
 
-        # def get_score(combo: list[str]) -> float:
         model = sklearn.ensemble.HistGradientBoostingClassifier(random_state=0)
         model.fit(xtrain, ytrain)
 
-        # print(importance)
-        # print(importance.importances_mean)
-        # print(model.feature_importances_)
         score = model.score(xtest, ytest)
 
         print(f"Model score: {score:.3f}")
-        # raise NotImplementedError()
 
         print("Asessing feature importance. This takes time..")
         importance = sklearn.inspection.permutation_importance(
             model, xtest, ytest, n_repeats=20, random_state=0, n_jobs=-1
         )
-
-        # print("Relative feature importance:")
-        # for i in importance.importances_mean.argsort()[::-1]:
-        #     # if importance.importances_mean[i] - 2 * importance.importances_std[i] > 0:
-        #     print(
-        #         f"\t{model.feature_names_in_[i]:<14}"
-        #         f"{importance.importances_mean[i]:.3f}"
-        #         f" +/- {importance.importances_std[i]:.3f}"
-        #     )
 
         importance_df = pd.DataFrame(
             {
@@ -689,16 +648,10 @@ def create_gap_mask(
 
     if "gap_distance" in x_cols:
         update("Making gap distances")
-        # eastings, northings = get_eastings_northings(dem.bounds, *dem.shape)
-
-        # tree = get_gap_distance_tree(eastings=eastings, northings=northings, nodata_mask=dem.data.mask)
 
         dist = scipy.ndimage.distance_transform_edt(~dem.data.mask) * dem.res[0]
         vals["gap_distance"] = dist.ravel()
         del dist
-
-        # vals["gap_distance"] = 0.
-        # vals.loc[data_mask.ravel(), "gap_distance"] = tree.query(np.transpose([eastings[data_mask], northings[data_mask]]))[0]
 
         # del tree
         # del eastings
@@ -727,23 +680,14 @@ def create_gap_mask(
 
     outliers = np.ones(vals.shape[0], dtype="uint8").reshape(dem.shape) * 255
 
-    # raw_predictions = model.model._raw_predict(vals[x_cols].loc[data_mask.ravel()], n_threads=-1)
-    # outliers[data_mask] = (model.model._loss.predict_proba(raw_predictions)[:, 1] * 255).astype("uint8")
-
     outliers[data_mask] = (
         model.model.predict_proba(vals[x_cols].loc[data_mask.ravel()])[:, 1] * 255
     ).astype("uint8")
-    # outliers = (model.model.predict_proba(vals[x_cols])[:, 1] * 255).astype("uint8").reshape(dem.shape)
-    # outliers[dem.data.mask] = 255
-    # plt.imshow(outliers)
-    # plt.show()
 
     outliers = xdem.DEM.from_array(outliers, crs=dem.crs, transform=dem.transform)
     del dem
 
     update(f"Saving {out_path}")
-
-    # raise NotImplementedError()
 
     out_path.parent.mkdir(exist_ok=True, parents=True)
     outliers.save(out_path, tiled=True, co_opts={"ZLEVEL": "12"})
@@ -786,7 +730,6 @@ def generate_all_masks(
                 create_gap_mask(filename=stem, model=model_result, verbose=verbose_progress)
             except ValueError as exception:
                 print(f"Exception: {exception}")
-
 
             progress_bar.update()
 

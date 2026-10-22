@@ -62,9 +62,6 @@ def load_json(path: Path) -> dict[Any, Any]:
 
 cache_json = precompile_cache(routine=(save_json, load_json, "json"))
 
-# cache_json_subdir = lambda subdir: functools.partial(projectfiles.cache, routine=(save_json, load_json, "json"), cache_dir=CONSTANTS.cache_dir.joinpath(subdir))
-# cache_json_subdir.__doc__ = projectfiles.cache.__doc__
-
 
 def save_feather(path: Path, obj: gpd.GeoDataFrame):
     obj.to_feather(path)

@@ -12,13 +12,10 @@ import shapely.geometry
 from xml.sax.saxutils import escape
 
 from pathlib import Path
-import matplotlib.pyplot as plt
-# import xdem
 
 import adsvalbard.utilities
 import adsvalbard.rasters
 import adsvalbard.vert_coreg
-
 
 def get_temp_dir() -> Path:
     return Path("temp.svalbard/uncertainty")
@@ -28,7 +25,6 @@ def get_chunks_dir() -> Path:
 
 def var_name_to_se_name(var_col: str) -> str:
     return var_col.replace("_slope", "_se").replace("_accel", "_accel_se") 
-
 
 def sample_points(n_points: int = int(1e6), redo: bool = False):
     temp_dir = get_temp_dir()
@@ -60,7 +56,6 @@ def sample_points(n_points: int = int(1e6), redo: bool = False):
 
     for key, fp in reversed(files.items()):
         points[key] = adsvalbard.rasters.sample_raster(fp, points.geometry)
-        # print(points.shape[0])
         if key.endswith("_slope") or key.endswith("_accel"):
             points.loc[points[key] == 0., key] = np.nan
 
@@ -71,8 +66,6 @@ def sample_points(n_points: int = int(1e6), redo: bool = False):
             points.dropna(inplace=True, subset=[key])
         if points.shape[0] == 0:
             raise ValueError("No points left!")
-
-    # points.dropna(inplace=True, subset=[key for key in keys if key not in var_keys])
 
     # Read stable terrain mask
     points["stable"] = adsvalbard.rasters.sample_raster(Path("temp/stable_terrain.tif"), points.geometry) == 1
@@ -85,7 +78,6 @@ def sample_points(n_points: int = int(1e6), redo: bool = False):
 
     return gpd.read_feather(out_path)
 
-
 def make_err_function(points: gpd.GeoDataFrame, pred_col: str, var_cols: list[str]):
 
     bins = {}
@@ -97,7 +89,6 @@ def make_err_function(points: gpd.GeoDataFrame, pred_col: str, var_cols: list[st
         else:
             bins[col] = np.unique(np.percentile(points[col], np.linspace(0, 100, 10)))
 
-    # print(np.unique(points["dem_quality_mode"].astype(int), return_counts=True))
     import xdem
     df = xdem.spatialstats.nd_binning(
         values=points.loc[points["stable"], pred_col].values,
@@ -107,7 +98,7 @@ def make_err_function(points: gpd.GeoDataFrame, pred_col: str, var_cols: list[st
         list_var_bins=[bins[key] for key in var_cols],
     )
     df.to_csv(f"temp.svalbard/uncertainty/binned_terrain_err_{pred_col}.csv")
-    
+
     dh_err_func_unscaled = xdem.spatialstats.interp_nd_binning(df, list_var_names=var_cols, statistic="nmad", min_count=5)
 
     _, dh_err_fun = xdem.spatialstats.two_step_standardization(
@@ -124,36 +115,21 @@ def make_err_function(points: gpd.GeoDataFrame, pred_col: str, var_cols: list[st
     assert np.abs(full_nmad - pred_nmad) < 0.1, f"{full_nmad:.3f}!={pred_nmad:.3f}"
 
     return dh_err_fun
-    
 
 def apply_function(chunk_dir: Path, func, pred_col: str, var_cols: list[str], redo: bool = False):
 
     temp_dir = get_temp_dir()
-    # chunk_dir = get_chunks_dir() / f"chunk_{chunk_nr}"
     chunk_nr = chunk_dir.stem.replace("chunk_", "")
 
     out_path = temp_dir / f"{chunk_dir.parts[-2]}/chunk_{chunk_nr}_{pred_col}_baseline_err.tif"
 
     tcorr_err_path = out_path.with_stem(out_path.stem.replace("_baseline_err", "_tcorr_err"))
 
-    #if tcorr_err_path.is_file():
-    #    redo = True
-    #    print(tcorr_err_path)
-
     if out_path.is_file() and not redo:
         return out_path
     se_col = var_name_to_se_name(pred_col)
 
-    # arrs = {}
-
-    # with rio.open(chunk_dir / f"chunk_{chunk_nr}_{pred_col}.tif") as raster:
-
-    #     arrs = pd.DataFrame({pred_col:raster.read(1, masked=True).filled(np.nan).ravel()
-
     with rio.open(chunk_dir / f"chunk_{chunk_nr}_{se_col}.tif") as raster:
-        # err = raster.read(1, masked=True)
-        # err = (err.astype("float32") * raster.scales[0] + raster.offsets[0]).filled(np.nan).ravel()
-        # err = raster.read(1, masked=True).filled(np.nan).ravel()
         bounds = raster.bounds
         meta = raster.meta
 
@@ -161,9 +137,6 @@ def apply_function(chunk_dir: Path, func, pred_col: str, var_cols: list[str], re
             np.linspace(bounds[0] + raster.res[0] / 2, bounds[2] - raster.res[0] / 2, raster.width), 
             np.linspace(bounds[1] + raster.res[1] / 2, bounds[3] - raster.res[1] / 2, raster.height)[::-1], 
         )
-
-        
-
 
     paths=  {
         "terr_slope": Path("temp/npi_slope.tif"),
@@ -181,28 +154,10 @@ def apply_function(chunk_dir: Path, func, pred_col: str, var_cols: list[str], re
         else:
             with rio.open(paths[key]) as raster:
                 window = rio.windows.from_bounds(*bounds, raster.transform)
-                # print((meta["height"], meta["width"]), window)
                 arr = raster.read(1, masked=True, window=window, boundless=True)
                 arrs[key] = (arr * raster.scales[0] + raster.offsets[0]).filled(np.nan).ravel()
 
-    # err = np.max([func(arrs), err], axis=0)
     err = func(arrs)
-
-    # if tcorr_err_path.is_file():
-
-    #     with rio.open(tcorr_err_path) as raster:
-    #         tcorr_err = (raster.read(1, masked=True).astype("float32") * raster.scales[0]).filled(0).ravel()
-
-    #     err = np.hypot(tcorr_err, err)
-        # if "004_015" in tcorr_err_path.stem:
-        #     import matplotlib.pyplot as plt
-        #     plt.subplot(1, 3, 1)
-        #     plt.imshow(err.copy().reshape((meta["height"], meta["width"])), vmin=0, vmax=0.5)
-        #     plt.subplot(1, 3, 2)
-        #     plt.imshow(tcorr_err.copy().reshape((meta["height"], meta["width"])), vmin=0, vmax=0.5)
-        #     plt.subplot(1, 3, 3)
-        #     plt.imshow(err.reshape((meta["height"], meta["width"])), vmin=0, vmax=0.5)
-        #     plt.show()
 
     scale = (65534 / 10)
     err = np.where(
@@ -217,16 +172,11 @@ def apply_function(chunk_dir: Path, func, pred_col: str, var_cols: list[str], re
         raster.write(err.reshape((meta["height"], meta["width"])), 1)
         raster.scales = (1 / scale,)
 
-
     shutil.move(temp_path, out_path)
 
-    
     return out_path
 
-    
-
 def sample_wrapper(kwargs):
-    # filepath, points, dem_title = args
     points = kwargs["points"]
     vals = adsvalbard.rasters.sample_raster(filepath=kwargs["filepath"], geometry=points.geometry)
 
@@ -242,7 +192,6 @@ def sample_wrapper(kwargs):
 
         outliers = adsvalbard.rasters.sample_raster(filepath=kwargs["outlier_proba_filepath"], geometry=points.geometry) > (outlier_threshold * 255)
         vals[outliers] = np.nan
-
 
     return pd.Series(vals, index=pd.MultiIndex.from_arrays((points["id"], [kwargs["dem_title"]] * points.shape[0]), names=["id", "title"]))
 
@@ -388,7 +337,6 @@ def check_bad_pts(prefix: str = "", gui: bool = False):
 			"087": [519, 557],
 			"089": [162, 166],
 			"090": [771, 785],
-			# "091": [518, 528],
         },
         "dem": {  # This means co-registered DEMs
 			"011": [376, 381],
@@ -443,14 +391,7 @@ def check_bad_pts(prefix: str = "", gui: bool = False):
     elif prefix == "dem":  # This means co-registered
         filepath_pattern = lambda title: Path(f"temp.svalbard/arcticdem_coreg/{title}_dem_coreg.tif")
         apply_matchtag = False
-    # elif prefix == "dem_noncoreg":
-    #     filepath_pattern = lambda title: Path(f"temp.svalbard/arcticdem_vrts/{title}_dem_epsg32633.vrt")
 
-    #     import adsvalbard.mosaicking
-    #     biases = {}
-    #     for year in range(2013, 2025):
-    #         biases[year] = adsvalbard.mosaicking.get_uncorr_bias(year)
-            
     else:
         raise NotImplementedError()
 
@@ -487,30 +428,10 @@ def check_bad_pts(prefix: str = "", gui: bool = False):
         elif prefix == "dem":
             sample_call_args[-1]["outlier_proba_filepath"] = Path(f"temp.svalbard/outlier_proba/{grouped['datetime'].iloc[0].year}/{filepath.stem}_outlier_proba.tif")
             sample_call_args[-1]["outlier_threshold"] = 0.75
-        # elif prefix == "dem_noncoreg":
-        #     sample_call_args[-1]["bias"] = biases[grouped["datetime"].iloc[0].year]
-            
+
     years = pd.Series(years, index=titles)
 
-    # print(sample_wrapper(sample_call_args[1]))
-    # return
-
     points = pd.concat(tqdm.contrib.concurrent.process_map(sample_wrapper, sample_call_args, chunksize=1)).dropna()
-
-    # good_titles = []
-    # bad_titles = []
-    # for key in ylims:
-    #     pts = points.loc[(key, slice(None))]
-
-    #     bad = (pts < ylims[key][0]) | (pts > ylims[key][1])
-    #     for title, isbad in bad.items():
-    #         if isbad and title not in good_titles and title not in bad_titles:
-    #             bad_titles.append(title)
-
-    #         if not isbad:
-    #             if title in bad_titles:
-    #                 bad_titles.remove(title)
-    #             good_titles.append(title)
 
     from collections import Counter
 
@@ -529,7 +450,6 @@ def check_bad_pts(prefix: str = "", gui: bool = False):
                 # Only mark bad if we've never (or not yet twice) seen it as good
                 elif good_counts[title] < 3:
                     bad_titles.add(title)
-                # bad_titles.add(title)
             else:
                 ...
                 # Count good observations
@@ -574,7 +494,7 @@ def check_bad_pts(prefix: str = "", gui: bool = False):
                 # Skip non-data axes (like the button axis)
                 if ax is button_ax:
                     continue
-        
+
                 if i >= len(point_labels):
                     continue
                 ylim = [round(v) for v in ax.get_ylim()]
@@ -584,9 +504,7 @@ def check_bad_pts(prefix: str = "", gui: bool = False):
                 print(f'\t\t\t"{point_labels[i]}": {ylim},')
         button.on_clicked(on_button_clicked)
 
-
         plt.show()
-    
 
 def _pad_bounds(bounds: rio.coords.BoundingBox, pad: float) -> rio.coords.BoundingBox:
     return rio.coords.BoundingBox(
@@ -595,7 +513,6 @@ def _pad_bounds(bounds: rio.coords.BoundingBox, pad: float) -> rio.coords.Boundi
         right=bounds.right + pad,
         top=bounds.top + pad,
     )
-
 
 def calculate_max_abs_curvature_chunk(
     dem_path: Path,
@@ -653,7 +570,6 @@ def calculate_max_abs_curvature_chunk(
 
     return out_path
 
-
 def calculate_all_max_abs_curvature_chunks() -> Path:
     import adsvalbard.stacking
     from osgeo import gdal
@@ -680,7 +596,6 @@ def calculate_all_max_abs_curvature_chunks() -> Path:
 
     return mosaic_path
 
-
 def main(redo: bool = False):
     from osgeo import gdal
     gdal.UseExceptions()
@@ -701,8 +616,6 @@ def main(redo: bool = False):
     chunk_dirs = list(filter(lambda d: d.is_dir(), chunks_dir.glob("chunk_*_*")))
 
     for pred_col in pred_cols:
-    # pred_col = "trend_2013-2024_slope"
-        se_col = var_name_to_se_name(pred_col)
         func = make_err_function(points, pred_col=pred_col, var_cols=var_cols)
         out_paths = []
 
@@ -721,13 +634,6 @@ def main(redo: bool = False):
         )
 
     return
-    points["dh_err_pred"] = np.hypot(func(points[var_cols]), points[se_col]) 
-
-    vmin, vmax = np.nanpercentile(points["dh_err_pred"], [2, 98])
-    plt.scatter(points.geometry.x, points.geometry.y, c=points["dh_err_pred"], vmin=vmin, vmax=vmax)
-    plt.colorbar()
-    plt.show()
-
 
 def patch_method_uncertainty():
 
@@ -750,7 +656,6 @@ def patch_method_uncertainty():
     for key in ["trend_2013-2018_slope", "trend_2019-2024_slope", "trend_2013-2024_slope"]:
         trend_path = Path(f"temp.svalbard/filt/svalbard/mosaics_3584/out/{key}.tif")
 
-
         scale = rio.open(trend_path).scales[0]
         with rio.open(trend_path, overview_level=2) as raster:
             window = rio.windows.from_bounds(*bounds, raster.transform)
@@ -758,10 +663,6 @@ def patch_method_uncertainty():
             dhdt = (raster.read(1, masked=True, boundless=True, window=window).astype("float32") * scale).filled(np.nan)
 
         dhdt = np.where(stable, dhdt, np.nan)
-
-        # import matplotlib.pyplot as plt
-        # plt.imshow(dhdt, vmin=-.1, vmax=.1, cmap="RdBu")
-        # plt.show()
 
         areas = 10 ** np.linspace(np.log10(raster.res[0] ** 2), np.log10(5e8), 15)
 
@@ -775,23 +676,12 @@ def patch_method_uncertainty():
 
         patches.to_csv(f"temp.svalbard/uncertainty/patch_method_{key}.csv", index=False)
 
-        # import matplotlib.pyplot as plt
-        # plt.title(key)
-        # plt.scatter(patches["exact_areas"], patches["nmad"])
-        # plt.xscale("log")
-        # plt.yscale("log")
-        # plt.show()
         print(patches)
 
-    
-
-        
-
     return
-        
+
 import numpy as np
 import scipy.ndimage
-
 
 def mix_trends_with_square_gaps(
     trend_with_2024: np.ndarray,
@@ -915,7 +805,7 @@ def mix_trends_with_square_gaps(
 
     gap_mask = np.zeros((h, w), dtype=bool)
     gap_id_mask = np.zeros((h, w), dtype=np.int32)
-    
+
     gap_id = 1
     for y0 in y_starts:
         for x0 in x_starts:
@@ -937,9 +827,8 @@ def mix_trends_with_square_gaps(
 
 def get_nmad(data):
     median = np.nanmedian(data, axis=-1)
-  
-    return 1.4826 * np.nanmedian(np.abs(data - median), axis=-1)
 
+    return 1.4826 * np.nanmedian(np.abs(data - median), axis=-1)
 
 def get_temporal_biascorr_uncertainty_relationship(chunk_nr: str = "005_018", redo: bool = False):
     out_path = Path("temp.svalbard/uncertainty/temporal_biascorr_area_nmad.csv")
@@ -971,20 +860,17 @@ def get_temporal_biascorr_uncertainty_relationship(chunk_nr: str = "005_018", re
 
     dems = np.hstack(dems)
     flags = np.hstack(flags)
-            
 
     with rio.open(f"{base_pattern}_trend_2019-2024_slope.tif") as raster:
         meta = raster.meta
         res = raster.res[0]
         trend_with_2024 = (raster.read(1, masked=True) * raster.scales[0]).filled(np.nan)
 
-        
     trend_without_2024 = adsvalbard.mosaicking.fit_trend(
         dems,
         flags,
         verbose=False,
     )["slope"].reshape(trend_with_2024.shape)
-
 
     areas = np.empty((0,))
     area_nmads = np.empty((0,))
@@ -992,7 +878,6 @@ def get_temporal_biascorr_uncertainty_relationship(chunk_nr: str = "005_018", re
     distances = np.empty((0,))
     for gap_size_px in tqdm.tqdm(np.linspace(100, 1500, 60, dtype=int)):
         mixed, dist_mask, gap_mask, gap_id_mask =  mix_trends_with_square_gaps(trend_with_2024=trend_with_2024, trend_without_2024=trend_without_2024, gap_size_px=gap_size_px, res=res, min_large_gaps=10)
-
 
         with tempfile.TemporaryDirectory() as temp_dir_str:
             temp_dir = Path(temp_dir_str)
@@ -1006,7 +891,6 @@ def get_temporal_biascorr_uncertainty_relationship(chunk_nr: str = "005_018", re
             quality[gap_mask] = 0
             with rio.open(qual_temp_path, "w", count=1, height=mixed.shape[0], width=mixed.shape[1], transform=meta["transform"], crs=meta["crs"], dtype="uint8") as raster:
                 raster.write(quality, 1) 
-
 
             bias: np.ndarray = adsvalbard.vert_coreg.temporal_biascorr_inner(
                 chunks=chunks,
@@ -1036,21 +920,6 @@ def get_temporal_biascorr_uncertainty_relationship(chunk_nr: str = "005_018", re
         diffs = np.concatenate([diffs, diff_vals])
         distances = np.concatenate([distances, dist_mask[gap_mask]])
 
-
-    
-
-        # import matplotlib.pyplot as plt
-        # plt.subplot(1, 4, 1)
-        # plt.imshow(mixed, vmin=-1, vmax=1, cmap="RdBu")
-        # plt.subplot(1, 4, 2)
-        # plt.imshow(dist_mask, vmin=0, vmax=5000)
-        # plt.subplot(1, 4, 3)
-        # plt.imshow(gap_mask)
-        # plt.subplot(1, 4, 4)
-        # plt.imshow(bias, vmin=-.1, vmax=.1, cmap="RdBu")
-
-        # plt.show()
-    
     out = pd.Series(area_nmads, index=areas, name="nmad")
     out.index.name = "area_m2"
     out.to_csv(out_path)
@@ -1071,10 +940,6 @@ def get_temporal_biascorr_uncertainty_relationship(chunk_nr: str = "005_018", re
     out2.to_csv(out_path2)
 
     return out, out2
-    import matplotlib.pyplot as plt
-    plt.scatter(areas, area_nmads)
-    plt.show()
-    return
 
 def peak_with_linear_tail(x, params):
     """
@@ -1096,7 +961,6 @@ def peak_with_linear_tail(x, params):
     # Blend: s(x)*g(x) + (1-s(x))*ell(x)
     return g * s + ell * (1.0 - s)
 
-
 def get_temporal_biascorr_uncertainty(verbose: bool = True, include_neff_standardization: bool = False):
     """
 
@@ -1116,12 +980,10 @@ def get_temporal_biascorr_uncertainty(verbose: bool = True, include_neff_standar
 
     # Some strange outliers make fitting difficult. This removes them
     per_distance = per_distance.loc[:2800]
-    # distance_err_model = lambda distance: spherical_model(distance, distance_model_res.x)
     distance_err_model = np.poly1d(np.polyfit(per_distance.index, per_distance, deg=1))
 
     per_area.index /= 1e6
     per_area.index.name = "area_km2"
-
 
     if include_neff_standardization:
         # This fits a Gaussian peak at around 12 km² (assessed visually) and then it tapers to a linear
@@ -1145,18 +1007,6 @@ def get_temporal_biascorr_uncertainty(verbose: bool = True, include_neff_standar
 
         neff_data = pd.read_csv("vgm_neff_cirq.csv")
         neff_model = scipy.interpolate.interp1d(neff_data.values[:, 0] / 1e6, neff_data.values[:, 1])
-    # plt.scatter(per_distance.index, per_distance)
-    # plt.plot(per_distance.index, distance_err_model(per_distance.index))
-    # plt.show()
-
-    
-    # return
-
-    # xs = np.linspace(0, 100)
-    # plt.scatter(per_area.index, per_area)
-    # plt.plot(xs, area_err_model(xs))
-    # plt.show()
-    # return
 
     all_chunks = gpd.read_file("temp.svalbard/chunk_outlines.geojson")
 
@@ -1180,13 +1030,8 @@ def get_temporal_biascorr_uncertainty(verbose: bool = True, include_neff_standar
                 print("Reading ocean")
             ocean = raster.read(1, window=window, boundless=True) == 1
 
-            # arr_bounds = rio.windows.bounds(window, raster.transform)
             if verbose:
                 print("Constructing coords")
-            # x_coords, y_coords = np.meshgrid(
-            #     np.linspace(arr_bounds[0] + raster.res[0] / 2, arr_bounds[2] - raster.res[0] / 2, ocean.shape[1]), 
-            #     np.linspace(arr_bounds[1] + raster.res[1] / 2, arr_bounds[3] - raster.res[1] / 2, ocean.shape[0])[::-1], 
-            # )
 
             window_transform = rio.windows.transform(window, raster.transform)
         with rio.open(filepaths["stable_terrain"]) as raster:
@@ -1194,19 +1039,17 @@ def get_temporal_biascorr_uncertainty(verbose: bool = True, include_neff_standar
                 print("Reading stable")
             window = rio.windows.from_bounds(*bounds, raster.transform)
             stable_terrain = raster.read(1, window=window, boundless=True) == 1
-        
+
         glaciers = (~ocean) & (~stable_terrain)
         with rio.open(filepaths["quality"]) as raster:
             window = rio.windows.from_bounds(*bounds, raster.transform)
             missing_data = (raster.read(1, window=window, boundless=True) == 0)
 
-        
         patch = missing_data & glaciers
 
         gap_distance = scipy.ndimage.distance_transform_edt(patch) * raster.res[0]
         err_d = np.zeros(patch.shape, dtype="float64")
         err_d[patch] = distance_err_model(gap_distance[patch])
-
 
         if include_neff_standardization:
             # Label and process each patch part individually
@@ -1228,9 +1071,7 @@ def get_temporal_biascorr_uncertainty(verbose: bool = True, include_neff_standar
                 inflation = target_mean_err / d_mean_err
                 err_d[labeled == idx] *= inflation
 
-    
                 print(f"{target_mean_err=:.2f}, {d_mean_err=:.2f}, {neff=:.2f}, {gap_area_km2=:.2f}") 
-
 
         for _, chunk in chunks.iterrows():
 
@@ -1252,44 +1093,6 @@ def get_temporal_biascorr_uncertainty(verbose: bool = True, include_neff_standar
                 params=meta,
                 redo=True,
             )
-            # with rio.open(se_path.with_stem(se_path.stem.replace("_slope", "_slope_tcorr_err"))) as raster:
-
-                # print(data_window.toslices())
-            
-
-        # plt.subplot(1,2, 1)
-        # plt.imshow(gap_distance)
-        # plt.subplot(1,2, 2)
-        # plt.imshow(err_d)
-
-        # plt.show()
-
-    # dist_bins = np.linspace(-0.01, distances.max() + 0.01, 50)
-    # bin_centers = (dist_bins[1:] + dist_bins[:-1]) / 2
-    # digitized = np.digitize(distances, bins=dist_bins)
-
-    # import matplotlib.pyplot as plt
-    # for idx in np.unique(digitized):
-    #     vals = diffs[digitized == idx]
-
-    #     nmad = get_nmad(vals)
-
-    #     plt.scatter(bin_centers[idx - 1], nmad)
-
-    # plt.show()
-
-
-    # diff = trend_with_2024 - trend_without_2024
-
-    # import matplotlib.pyplot as plt
-    # plt.subplot(1, 3, 1)
-    # plt.imshow(trend_without_2024, vmin=-1, vmax=1, cmap="RdBu")
-    # plt.subplot(1, 3, 2)
-    # plt.imshow(trend_with_2024, vmin=-1, vmax=1, cmap="RdBu")
-    # plt.subplot(1, 3, 3)
-    # plt.imshow(diff, vmin=-0.2, vmax=0.2, cmap="RdBu")
-    # plt.show()
-
 
 def _gt_from_affine(transform: rio.Affine) -> str:
     """
@@ -1299,7 +1102,6 @@ def _gt_from_affine(transform: rio.Affine) -> str:
     gt = (transform.c, transform.a, transform.b,
           transform.f, transform.d, transform.e)
     return ", ".join(repr(v) for v in gt)
-
 
 NODATA_RAW = 65535
 MAX_VALID_RAW = 65534
@@ -1318,7 +1120,6 @@ def _path_for_vrt(src_path: Path, vrt_path: Path, relative: bool) -> tuple[str, 
         return str(rel), "1"
     else:
         return str(src_path), "0"
-
 
 def write_hypot_uint16_vrt(
     raster_a: str | Path,
@@ -1463,7 +1264,6 @@ def hypot_uint16_raw(in_ar, out_ar, xoff, yoff, xsize, ysize,
     out_vrt.write_text(vrt_xml, encoding="utf-8")
     return out_vrt   
 
-
 def make_fit_err_vrt():
 
     from osgeo import gdal
@@ -1491,7 +1291,6 @@ def make_fit_err_vrt():
                 if name not in error_chunks:
                     error_chunks[name] = []
 
-
             tcorr_err_path = uncertainty_dir / f"chunks_3584/{chunk_dir.name}_{product_name}_tcorr_err.tif"
 
             if tcorr_err_path.is_file():
@@ -1518,9 +1317,6 @@ def make_fit_err_vrt():
             str(vrt_path),
             list(map(str, error_chunks[product_name])),
         )
-        
-            
-
 
 if __name__ == "__main__":
     main()

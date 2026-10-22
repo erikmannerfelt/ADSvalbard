@@ -28,14 +28,10 @@ gdal.UseExceptions()
 def vrt_warp(
     output_filepath: Path | str,
     input_filepath: Path | str,
-    # src_crs: CRS | int | str | None = None,
     dst_crs: rio.CRS | int | str | None = None,
     dst_res: tuple[float, float] | float | None = None,
-    # src_res: tuple[float, float] | None = None,
     dst_shape: tuple[int, int] | None = None,
-    # src_bounds: BoundingBox | list[float] | None = None,
     dst_bounds: rasterio.coords.BoundingBox | list[float] | None = None,
-    # src_transform: Affine | None = None,
     dst_transform: rio.Affine | None = None,
     src_nodata: int | float | None = None,
     dst_nodata: int | float | None = None,
@@ -83,7 +79,6 @@ def vrt_warp(
         raise ValueError("dst_shape and dst_res cannot be used at the same time.")
 
     if dst_transform is not None:
-        # kwargs["dstTransform"] = dst_transform.to_gdal()
         kwargs["outputBounds"] = list(
             rasterio.transform.array_bounds(*dst_shape, dst_transform)
         )  # type: ignore
@@ -234,7 +229,6 @@ def generate_raster_chunks(
     shape = adsvalbard.utilities.shape_from_bounds_res(bounds, [res] * 2)
     transform = rasterio.transform.from_origin(bounds.left, bounds.top, res, res)
 
-    
     n_row_chunks = int(np.ceil(shape[0] / chunksize))
     n_col_chunks = int(np.ceil(shape[1] / chunksize))
 
@@ -478,5 +472,4 @@ def build_stable_terrain_mask(
 def sample_raster(filepath: Path, geometry: gpd.GeoSeries, nodata: float | int = np.nan) -> np.ndarray:
     with rio.open(filepath) as raster:
         arr = np.fromiter(map(lambda v: v[0], raster.sample(np.column_stack((geometry.x, geometry.y)))), count=geometry.shape[0], dtype=raster.dtypes[0])
-        # print(filepath.name, raster.scales)
         return np.where(arr == raster.nodata, nodata, arr* raster.scales[0] + raster.offsets[0])

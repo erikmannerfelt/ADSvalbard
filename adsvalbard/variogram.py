@@ -59,7 +59,6 @@ class StableBlockSampler:
             1,
             window=self.src_win,
             out_shape=(coarse_h, coarse_w),
-            # resampling=Resampling.max,
             masked=False,
         )
 
@@ -386,19 +385,15 @@ def sample_variogram_points_stable_multires(
 
 # def sample_points(min_bin: float = np.log10(30), max_bin: np.log10(200000), n_points=3000, redo=False):
 
-    
 
 def main(verbose=True, n_points=10000, redo=False, random_seed=1):
     import adsvalbard.rasters
-    # bbox = (469120,8554890,583640,8835780)
-    # bbox = (408989.5978,8531849.9630,666111.5882,8867476.9870)
     bbox = (396000, 8479000, 727000, 8954000) # Spitsbergen and Nordaustlandet
     bins = 10 ** np.linspace(np.log10(30), np.log10(2.5e5), 50) 
-    
+
     var_col = "trend_2013-2024_slope"
     cache_path = Path(f"temp.svalbard/uncertainty/vgm_sample_pts_{var_col}.arrow")
     err_col = var_col.replace("_slope", "_slope_baseline_err")
-    # err_col = var_col + "_se"
 
     if cache_path.is_file() and not redo:
         pts = gpd.read_feather(cache_path)
@@ -433,7 +428,6 @@ def main(verbose=True, n_points=10000, redo=False, random_seed=1):
 
         pts = pts.query("stable").copy()
 
-
     print("Sampling elevation change")
     pts[var_col] = adsvalbard.rasters.sample_raster(f"temp.svalbard/filt/svalbard/mosaics_3584/{var_col}.vrt", geometry=pts["geometry"])
     pts[err_col] = adsvalbard.rasters.sample_raster(f"temp.svalbard/filt/svalbard/mosaics_3584/{err_col}.vrt", geometry=pts["geometry"])
@@ -463,7 +457,6 @@ def main(verbose=True, n_points=10000, redo=False, random_seed=1):
         estimator="dowd",
     )
 
-
     exp_scale = original_var / pts[scaled_col].var()
     variogram[["exp", "err_exp"]] *= exp_scale
     variogram.to_csv("temp.svalbard/uncertainty/empirical_variogram.csv")
@@ -471,7 +464,6 @@ def main(verbose=True, n_points=10000, redo=False, random_seed=1):
     vgm_model, params = xdem.spatialstats.fit_sum_model_variogram(["Sph", "Gaussian", "Gaussian"], variogram)
 
     params.to_csv("temp.svalbard/uncertainty/variogram_model.csv", index=False)
-
 
     areas = 10 ** np.linspace(0, np.log10(35000e6), 1000)
     neff = []
@@ -490,15 +482,13 @@ def main(verbose=True, n_points=10000, redo=False, random_seed=1):
     axes[1].set_ylim(1e-3, np.nanmax(vgm_model(variogram.index)) * 1.25)
     for r in params["range"].values:
         axes[1].vlines(r, *axes[1].get_ylim(), color="gray", linestyles="--")
-        
-    
+
     axes[0].set_yscale("log")
     axes[0].set_xscale("log")
     axes[0].set_ylabel("Bin count")
     axes[1].set_ylabel("Variance (m²)")
     axes[1].legend(loc="lower right")
     axes[1].set_xlabel("Spatial lag (m)")
-
 
     print(params)
 

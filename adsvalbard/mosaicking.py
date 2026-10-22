@@ -17,7 +17,6 @@ def sample_raster(filepath: Path, geometry: gpd.GeoSeries, nodata: float | int =
     with rio.open(filepath) as raster:
         arr = np.fromiter(map(lambda v: v[0], raster.sample(np.column_stack((geometry.x, geometry.y)))), count=geometry.shape[0], dtype=raster.dtypes[0])
         return np.where(arr == raster.nodata, nodata, arr)
-    
 
 def sample_points_for_bias(year: int, n_points: int = 80000, point_density_threshold: float | None = None, verbose: bool = True, redo: bool= False):
 
@@ -36,8 +35,6 @@ def sample_points_for_bias(year: int, n_points: int = 80000, point_density_thres
     if verbose:
         print("Reading land outlines")
     land = gpd.read_file("zip://data/outlines/NP_S100_SHP.zip/NP_S100_SHP/S100_Land_f.shp").simplify(20).to_frame().dissolve().to_crs(32633)
-    # land = land[land["AREA"] > 1200000000].dissolve().simplify(100)
-    # land = land.dissolve().simplify(20)
 
     # The stable terrain mask erroneously includes some glaciers as of February 2026.
     if verbose:
@@ -46,13 +43,7 @@ def sample_points_for_bias(year: int, n_points: int = 80000, point_density_thres
         warnings.filterwarnings("ignore")
         glaciers = gpd.read_file("zip://data/outlines/NP_S100_SHP.zip/NP_S100_SHP/S100_Isbreer_f.shp").simplify(20).to_frame().dissolve().to_crs(32633)
 
-    # import matplotlib.pyplot as plt
-    # glaciers.plot()
-    # plt.show()
-    # return
-
     bad_regions = gpd.read_file("shapes/bad_coreg_regions.geojson")
-    # land = land.difference(bad_regions.dissolve().geometry[0])
 
     dem_dir = Path(f"temp.svalbard/medians/svalbard/")
     rasters = {
@@ -82,26 +73,14 @@ def sample_points_for_bias(year: int, n_points: int = 80000, point_density_thres
 
     bad_stable = points.loc[points["stable"], "geometry"].intersects(glaciers.dissolve().geometry[0])
     points.loc[bad_stable[bad_stable].index, "stable"] = False
-    
-
-    # import matplotlib.pyplot as plt
-    # # points = points[~points["npi_dem"].isna()]
-    # plt.scatter(points.geometry.x, points.geometry.y, c=points["stable"].astype(int))
-    # plt.show()
 
     if verbose:
         print("Sampling NPI mosaic")
     points.loc[points["stable"], "npi_dem"] = sample_raster("temp/npi_mosaic.vrt", geometry=points.loc[points["stable"], "geometry"])
-    
+
     bad_unstable = points.loc[~points["stable"], "geometry"].intersects(bad_regions.dissolve().geometry[0])
     # Hacky solution to avoid sampling the corrected ArcticDEM here.
     points.loc[bad_unstable[bad_unstable].index, "stable"] = True
-
-    # print(points)
-    # import matplotlib.pyplot as plt
-    # points = points[~points["npi_dem"].isna()]
-    # plt.scatter(points.geometry.x, points.geometry.y, c=points["npi_dem"].astype(int))
-    # plt.show()
 
     for key, fp in rasters.items():
         if verbose:
@@ -115,15 +94,11 @@ def sample_points_for_bias(year: int, n_points: int = 80000, point_density_thres
 
     good_npi = ~points["npi_dem"].isna()
     good_corr = (points["corr_nmad"] < 10) & ~good_npi
-    
+
     points.loc[good_npi, "diff"] = points.loc[good_npi, "npi_dem"] - points.loc[good_npi, "uncorr"]
     points.loc[good_corr, "diff"] = points.loc[good_corr, "npi_dem"] - points.loc[good_npi, "uncorr"]
 
     points = points[~points["diff"].isna()]
-    # points = points[(points["corr_nmad"]
-    # points = points[((points["uncorr_nmad"] < 10) & (points["corr_nmad"] < 10)) | (points["uncorr_nmad"] < 10)]
-
-    # points["diff"] = points["corr"] - points["uncorr"]
 
     bin_size = 30000
     xbins = np.arange(land_bounds[0], land_bounds[2] + bin_size, bin_size)
@@ -145,36 +120,17 @@ def sample_points_for_bias(year: int, n_points: int = 80000, point_density_thres
     grid = gpd.GeoDataFrame(grid, geometry=gpd.points_from_xy(grid["x"], grid["y"], crs=points.crs))
     grid["count"] /= grid["count"].median()
 
-    # Remove points whose point counts are less than X% of the median count. These are often really off.
-    # grid = grid[(grid["count"] / grid["count"].median()) > point_density_threshold]
     grid = grid[grid["count"] > point_density_threshold]
 
     cache_filepath.parent.mkdir(exist_ok=True ,parents=True)
     grid.to_feather(cache_filepath)
     return gpd.read_feather(cache_filepath)
 
-
 def get_uncorr_bias(year: int):
 
     grid = sample_points_for_bias(year=year)
     model = scipy.interpolate.RBFInterpolator(grid[["x", "y"]], grid["diff"], kernel="linear")
 
-    return model
-
-    bounds = grid.buffer(50000).total_bounds
-    xx, yy = np.meshgrid(np.linspace(bounds[0], bounds[2], 500), np.linspace(bounds[1], bounds[3], 500)[::-1])
-    import matplotlib.pyplot as plt
-    fig = plt.figure()
-    axes = fig.subplots(1, 3, sharex=True, sharey=True)
-    axes[0].scatter(grid.geometry.x, grid.geometry.y, c=grid["diff"], vmin=-40, vmax=-20)
-    axes[1].imshow(model(np.column_stack((xx.ravel(), yy.ravel()))).reshape(xx.shape), vmin=-40, vmax=-20, extent=[bounds[0], bounds[2], bounds[1], bounds[3]])
-
-    # grid["count"] /= grid["count"].median()
-    axes[2].scatter(grid.geometry.x, grid.geometry.y, c=grid["count"], vmin=0, vmax=0.5)
-    for _, point in grid.iterrows():
-        axes[2].annotate(f"{point['count']:.2f}",(point.geometry.x, point.geometry.y))
-        
-    plt.show()
     return model
 
 def fit_trend_corr_nmad_1d(data, eps=1e-12) -> dict[str, np.ndarray]:
@@ -238,8 +194,6 @@ def fit_trend_corr_nmad_1d(data, eps=1e-12) -> dict[str, np.ndarray]:
     # --- Only mark as invalid when really no usable trend info ---
     invalid = (
         (S_w < 2) 
-        # (var_t <= eps)# |
-        # ~np.isfinite(r)
     )
     slope[invalid] = np.nan
     intercept[invalid] = np.nan
@@ -253,7 +207,6 @@ def fit_trend_corr_nmad_1d(data, eps=1e-12) -> dict[str, np.ndarray]:
         "nmad": nmad,
         "var_t": var_t,
     }
-
 
 def fit_trend(dems, flags, verbose: bool = True) -> dict[str, np.ndarray]:
     # If there are at least three good DEM points, remove all the quality=3 points
@@ -291,7 +244,6 @@ def fit_trend(dems, flags, verbose: bool = True) -> dict[str, np.ndarray]:
 
     return fit
 
-
 def get_dem_chunk_path(kind: str, chunk_nr: str, chunksize: int, year: int) -> Path:
     stack_dir = Path("temp.svalbard/medians/svalbard/")
 
@@ -303,7 +255,6 @@ def get_dem_chunk_path(kind: str, chunk_nr: str, chunksize: int, year: int) -> P
         return stack_dir / f"dem_noncoreg/median_dem_{year}_chunks_{chunksize}/chunk_{chunk_nr}.tif"
     if kind == "vertcoreg":
         return stack_dir / f"dem_vertcoreg/median_dem_{year}_chunks_{chunksize}/chunk_{chunk_nr}.tif"
-        
 
     return stack_dir / f"dem/median_filt_{kind}_dem_{year}_chunks_{chunksize}/chunk_{chunk_nr}.tif"
 
@@ -387,13 +338,6 @@ def load_and_mosaic_dem(chunk_nr: str, chunksize: int, year: int, return_uncorr:
             uncorr_dem["nmad"] = new_nmad
         prev_mask = prev_mask | mask
 
-        # If there's a vertcoreg tile, use ONLY that
-        # if key == "vertcoreg":
-        #     break
-
-        # if np.count_nonzero(~prev_mask) == 0:
-        #     break
-
     quality_flag[~np.isfinite(dem)] = 0
 
     return {
@@ -463,7 +407,6 @@ def prepare_formatted_array(key, arr):
 
     return arr, scale, offset, nodata
 
-
 def write_formatted(key, fp, arr, params, verbose: bool = True, redo: bool = False):
     shape = params["height"], params["width"]
 
@@ -499,8 +442,6 @@ def write_formatted(key, fp, arr, params, verbose: bool = True, redo: bool = Fal
         raster.offsets = (offset,)
     shutil.move(tmp_fp, fp)
 
-
-
 def compute_weight_field(meta: dict[str, object], bad_regions: gpd.GeoDataFrame, R=1000.0):
     """
     Compute weight_B field for a tile, or return None if no blending is needed.
@@ -514,7 +455,6 @@ def compute_weight_field(meta: dict[str, object], bad_regions: gpd.GeoDataFrame,
     transform = meta["transform"]
     height = meta["height"]
     width = meta["width"]
-    # height, width = shape
 
     # Tile bounds in map coordinates
     minx, miny, maxx, maxy = array_bounds(height, width, transform)
@@ -566,7 +506,6 @@ def compute_weight_field(meta: dict[str, object], bad_regions: gpd.GeoDataFrame,
     weight_B[mask_inside == 1] = 1.0
 
     return weight_B
-
 
 def blend_bands(
     dem_a, count_a, nmad_a, doy_a,
@@ -640,7 +579,6 @@ def blend_bands(
 
     return dem_out, count_out, nmad_out, doy_out
 
-
 def get_mosaic_filenames(chunk_nr: str, chunksize: int = 512 * 7) -> dict[str, Path]:
     years = list(range(2013, 2025))
     out_dir = Path(f"temp.svalbard/filt/svalbard/chunks_{chunksize}/chunk_{chunk_nr}")
@@ -668,9 +606,6 @@ def read_coastline(year: str, meta: dict[str, object]) -> np.ndarray:
     import rasterio.features
     import shapely.geometry
 
-    # import time
-
-    # start_time = time.time()
     filepath = Path(f"data/coastlines/Coast{year}.zip")
 
     bounds = shapely.geometry.box(*rio.transform.array_bounds(meta["height"], meta["width"], meta["transform"]))
@@ -683,8 +618,6 @@ def read_coastline(year: str, meta: dict[str, object]) -> np.ndarray:
             raise
         return np.zeros((meta["height"], meta["width"])) == 0
 
-    # print(f"Took {time.time() - start_time:.1f}s")
-
     return arr == 0
 
 def mosaic_tile(chunk_nr: str = "007_004", chunksize: int = 512 * 7, verbose: bool = True, redo: bool = False):
@@ -694,23 +627,6 @@ def mosaic_tile(chunk_nr: str = "007_004", chunksize: int = 512 * 7, verbose: bo
 
     if all(fp.is_file() for fp in out_paths.values()) and not redo:
         return out_paths
-    # out_dir = Path(f"temp.svalbard/filt/svalbard/chunks_{chunksize}/chunk_{chunk_nr}")
-
-    # out_paths = {}
-    # for year in years:
-    #     fp = out_dir / f"chunk_{chunk_nr}_{year}.tif"
-    #     out_paths[f"{year}_dem"] = fp
-    #     for key in ["quality", "doy", "count", "nmad"]:
-    #         out_paths[f"{year}_{key}"] = fp.with_stem(fp.stem + f"_{key}")
-
-    # for trend, name in [("0", f"{years[0]}-{years[5]}"), ("1", f"{years[6]}-{years[-1]}"), ("full", f"{years[0]}-{years[-1]}")]:
-    #     fp = out_dir / f"chunk_{chunk_nr}_trend_{name}.tif"
-    #     for part in ["r", "intercept", "nmad", "slope", "se"]:
-    #         out_paths[f"{part}_{trend}"] = fp.with_stem(fp.stem + f"_{part}")
-
-    #     if trend == "full":
-    #         out_paths["accel"] = fp.with_stem(fp.stem + "_accel")
-    #         out_paths["se_accel"] = fp.with_stem(fp.stem + "_accel_se")
 
     # Open a raster of the chunk (could be any) to get its metadata
     with rio.open(get_dem_chunk_path("p75", chunk_nr=chunk_nr, chunksize=chunksize, year=2024)) as raster:
@@ -726,11 +642,6 @@ def mosaic_tile(chunk_nr: str = "007_004", chunksize: int = 512 * 7, verbose: bo
     if chunk_nr == "003_022":
         weights = None
 
-    # import matplotlib.pyplot as plt
-    # plt.imshow(weights)
-    # plt.show()
-    # return
-
     for year in years:
         if verbose:
             print(year)
@@ -739,9 +650,6 @@ def mosaic_tile(chunk_nr: str = "007_004", chunksize: int = 512 * 7, verbose: bo
         out = load_and_mosaic_dem(chunk_nr=chunk_nr, chunksize=chunksize, year=year, use_vertcoreg=weights is not None)
         # If the chunk is close to a bad region, it will have weights to blend between vertcoreg and normal coreg:
         if weights is not None:
-            # import matplotlib.pyplot as plt
-            # plt.imshow(weights.reshape((params["height"], params["width"])))
-            # plt.show()
             # If the chunk is completely within a bad coreg region, then the vertcoreg will already have been loaded
             # and taken precedence. Therefore, nothing more needs to be done
             # If the chunk is at the boundary, all weights will not be 1 and blending is required
@@ -762,24 +670,6 @@ def mosaic_tile(chunk_nr: str = "007_004", chunksize: int = 512 * 7, verbose: bo
                 )
                 out["quality"][weights == 0.] = nonvertcoreg["quality"][weights == 0.]
                 del nonvertcoreg
-                
-        # if np.any(out["quality"] == 4) and weights is not None:
-        #     print("PRELININARY DISABLING WEIGHTS")
-        #     weights = None
-
-        # if weights is not None:
-        #     out["dem"], out["count"], out["nmad"], out["doy"] = blend_bands(
-        #         dem_a=out["dem"],
-        #         count_a=out["count"],
-        #         nmad_a=out["nmad"],
-        #         doy_a=out["doy"],
-        #         dem_b=out["uncorr"]["dem"],
-        #         count_b=out["uncorr"]["count"],
-        #         nmad_b=out["uncorr"]["nmad"],
-        #         doy_b=out["uncorr"]["doy"],
-        #         weight_B=weights,
-        #     )
-        #     out["quality"][weights > 0] = 3
 
         dems.append(out["dem"].ravel()[:, None])
         flags.append(out["quality"].ravel()[:, None])
@@ -795,8 +685,6 @@ def mosaic_tile(chunk_nr: str = "007_004", chunksize: int = 512 * 7, verbose: bo
                 redo=redo,
             )
             del out[key]
-            # if key not in ["dem", "quality"]:
-            #     del out[key]
     dems = np.hstack(dems)
     flags = np.hstack(flags)
     oceans = np.hstack(oceans)
@@ -807,7 +695,6 @@ def mosaic_tile(chunk_nr: str = "007_004", chunksize: int = 512 * 7, verbose: bo
 
     # These points are ocean in every DEM. Should be skipped
     only_ocean = np.count_nonzero(~oceans, axis=1) < 2
-    # only_ocean = oceans.all(axis=-1)
 
     # Retain points that aren't only in the ocean
     dems = dems[~only_ocean]
@@ -817,12 +704,8 @@ def mosaic_tile(chunk_nr: str = "007_004", chunksize: int = 512 * 7, verbose: bo
     flags = flags[~only_ocean]
     quality_mode = quality_mode[~only_ocean]
 
-    # enough_pts = np.count_nonzero(np.isfinite(dems), axis=-1) >= 2
-    # dems = dems[enough_pts]
-    # flags = flags[enough_pts]
-
     del oceans
-    
+
     data = {"quality_mode": quality_mode}
 
     if verbose:
@@ -847,14 +730,6 @@ def mosaic_tile(chunk_nr: str = "007_004", chunksize: int = 512 * 7, verbose: bo
 
         del data[f"var_t_{key}"]
 
-        # import matplotlib.pyplot as plt
-        # fig = plt.figure()
-        # axes = fig.subplots(1, 2, sharex=True, sharey=True)
-        # axes[0].imshow(data[f"trend_{key}"].reshape(shape), vmin=-3, vmax=3, cmap="RdBu")
-        # axes[1].imshow(data[f"nmad_{key}"].reshape(shape), vmin=0, vmax=10)
-        # plt.show()
-        
-
     del dems
     del flags
 
@@ -862,12 +737,6 @@ def mosaic_tile(chunk_nr: str = "007_004", chunksize: int = 512 * 7, verbose: bo
     data["accel"] = (data["slope_1"] - data["slope_0"]) / 6
     data["se_accel"] = np.sqrt(data["se_0"] ** 2 + data["se_1"] ** 2) / 6
 
-    # mask_valid = np.zeros_like(only_ocean, dtype=bool)
-    # mask_valid[~only_ocean] = enough_pts          # where we have enough points
-
-    # mask_no_enough = np.zeros_like(only_ocean, dtype=bool)
-    # mask_no_enough[~only_ocean] = ~enough_pts     # where we don't
-    
     for key, arr in data.items():
         if key not in out_paths:
             continue
@@ -876,48 +745,15 @@ def mosaic_tile(chunk_nr: str = "007_004", chunksize: int = 512 * 7, verbose: bo
 
         arr2[~only_ocean] = arr
 
-        # arr2[~only_ocean] = np.where(
-        #     enough_pts,
-        #     arr,
-        #     np.nan if "float" in str(arr.dtype) else 0,
-        # )
-
-        # arr2[~only_ocean][enough_pts] = arr
-        # arr2[~only_ocean][~enough_pts] = np.nan if "float" in str(arr.dtype) else 0
-        # arr2[~only_ocean] = arr
         fp = out_paths[key]
         write_formatted(key=key, fp=fp, arr=arr2, params=params, verbose=verbose, redo=redo)
-            
+
     return out_paths
-
-
-    # import matplotlib.pyplot as plt
-    # fig = plt.figure()
-    # axes = fig.subplots(1, 2, sharex=True, sharey=True)
-    # axes[0].imshow(slope.reshape(shape), vmin=-3, vmax=3, cmap="RdBu")
-    # axes[1].imshow(nmad.reshape(shape), vmin=0, vmax=10)
-    # plt.show()
-    
-    # print(dems.shape)
-    # print(dems.shape)
-    # return
-    # dems = np.moveaxis(dems, 0, 2)
-    # flags = np.moveaxis(flags, 0, 2)
-
-    # print("Removing bad timeseries")
-    # dems[(flags <= 2).sum(axis=-1)[:, :, None] & (flags == 3)] = np.nan
-
-    # print("Fitting trend")
-    # slope, intercept, r= fit_trend_and_corr(dems)
-
-
 
 def process_chunk_wrapper(args, verbose: bool = False):
     return mosaic_tile(**args, verbose=verbose)
 
 def mosaic_all_tiles(chunksize: int = 512 * 7, n_workers: int | None = 8, redo = False):
-
-    # chunk_nrs = [fp.stem.replace("chunk_", "").replace("_count", "") for fp in Path(f"temp.svalbard/medians/svalbard/dem/median_filt_075_dem_2024_chunks_{chunksize}/").glob("chunk_*count.tif")]
 
     import adsvalbard.stacking
 
@@ -928,7 +764,6 @@ def mosaic_all_tiles(chunksize: int = 512 * 7, n_workers: int | None = 8, redo =
     chunk_nrs = []
     for year in range(2013, 2025):
         for raster_type in ["dem", "dem_noncoreg"]:
-            # print(f"{raster_type}: {year}")
             filt = [0.75, 0.95] if raster_type == "dem" else [0.75]
 
             for threshold in filt:
@@ -941,7 +776,6 @@ def mosaic_all_tiles(chunksize: int = 512 * 7, n_workers: int | None = 8, redo =
                     chunk_nrs = [ch for ch in new_chunk_nrs if ch in chunk_nrs]
     import os
 
-    # return
     chunk_nrs.sort()
 
     call_args = []
@@ -953,22 +787,10 @@ def mosaic_all_tiles(chunksize: int = 512 * 7, n_workers: int | None = 8, redo =
 
         parts = chunk_nr.split("_")
 
-        # Do only Austfonna
-        # if (parts[0] <= "001") or (parts[0] >= "011") or (parts[1] < "010") or (parts[1] > "022"):
-        #     continue
-
-        # Do only Edgeøya
-        # if (parts[0] < "016") or (parts[0] > "021") or (parts[1] < "016") or (parts[1] > "021"):
-        #     continue
-
-        # if not Path(f"temp.svalbard/medians/svalbard/dem_noncoreg/median_dem_2017_chunks_3584/chunk_{chunk_nr}.tif").is_file() and not redo:
-        #     continue
-        
         out_paths = get_mosaic_filenames(chunk_nr=chunk_nr, chunksize=chunksize)
 
         if not all(fp.is_file() for fp in out_paths.values()) or redo:
             call_args.append({"chunk_nr": chunk_nr, "chunksize": chunksize, "redo": redo})
-            # continue # TEMPORARY
 
         all_out_paths.append(out_paths)
 
@@ -979,14 +801,13 @@ def mosaic_all_tiles(chunksize: int = 512 * 7, n_workers: int | None = 8, redo =
         else:
             tqdm.contrib.concurrent.process_map(process_chunk_wrapper, call_args, max_workers=n_workers, smoothing=0.1, desc="Mosaicking and fitting trend.")
 
-
     per_key_filepaths = {}
     for paths in all_out_paths:
 
         for key in paths:
             if key not in per_key_filepaths:
                 per_key_filepaths[key] = []
-            
+
             per_key_filepaths[key].append(paths[key].absolute())
 
     out_dir = Path(f"temp.svalbard/filt/svalbard/mosaics_{chunksize}/")
@@ -1000,9 +821,7 @@ def mosaic_all_tiles(chunksize: int = 512 * 7, n_workers: int | None = 8, redo =
                 "full": "2013-2024",
             }
 
-
     out_dir.mkdir(exist_ok=True)
-    # raise NotImplementedError()
 
     for key in per_key_filepaths:
 
@@ -1013,14 +832,12 @@ def mosaic_all_tiles(chunksize: int = 512 * 7, n_workers: int | None = 8, redo =
             name = f"trend_{periods['full']}_{'_'.join(key.split('_')[::-1])}"
         elif (period := key.split("_")[1]) in ["0", "1", "full"]:
             name = f"trend_{periods[period]}_{key.split('_')[0]}"
-            
 
         out_path = out_dir / f"{name}.vrt"
         gdal.BuildVRT(
             str(out_path),
             [str(fp) for fp in filter(lambda fp: fp.is_file(), per_key_filepaths[key])]
         )
-      
 
 def sample_point_timeseries_trends(
     workdir: Path = Path("temp.svalbard/filt/svalbard/mosaics_3584/out"),
@@ -1036,10 +853,7 @@ def sample_point_timeseries_trends(
 
     points = [
         (569452, 8691793, "Rabotbreen front", "rabotbreen"),
-        # (540096, 8606071, "Doktorbreen surge"),
-        # (667622, 8875455, "Austfonna summit"),
         (448450, 8757319, "Kronebreen terminus retreat", "kronebreen_terminus"),
-        # (513015, 8579753, "Amundsenisen"),
         (437100, 8825883, "Lilliehöökbreen accumulation area", "lilliehook_acc"),
         (570000, 8733400, "Negribreen central body", "negribreen_central"),
         (680684, 8895978, "Austfonna north", "austfonna_north"),
@@ -1134,7 +948,6 @@ def sample_point_timeseries_trends(
     pts = pd.DataFrame(points, columns=["x", "y", "name", "key"])
     pts = gpd.GeoDataFrame(pts, geometry=gpd.points_from_xy(pts["x"], pts["y"], crs=32633))
     pts.to_file(xy_path)
-
 
 if __name__ == "__main__":
     mosaic_all_tiles()

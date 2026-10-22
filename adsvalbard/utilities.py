@@ -358,7 +358,7 @@ def now_time() -> str:
 
 
 def create_random_points(bounds: rasterio.coords.BoundingBox, n_points: int,  crs: str | int | None = None, random_state: int = 0) -> gpd.GeoDataFrame:
-    
+
     rng: np.random.Generator = np.random.default_rng(random_state)
 
     if crs is None:

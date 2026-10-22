@@ -11,7 +11,6 @@ from pathlib import Path
 
 import dask
 
-# import dask.distributed
 import dask.dataframe as dd
 import geopandas as gpd
 import geoutils as gu
@@ -349,8 +348,6 @@ def get_strips() -> gpd.GeoDataFrame:
             progress_bar.update()
 
     if len(infos) > 0:
-        # for info in tqdm(infos, desc="Downloading metadata"):
-        #    download(info)
 
         with tqdm(total=len(infos), desc="Downloading metadata") as progress_bar:
             with concurrent.futures.ThreadPoolExecutor() as executor:
@@ -380,7 +377,6 @@ def get_strips() -> gpd.GeoDataFrame:
     strips = strips.set_geometry(
         strips["geometry"].apply(shapely.geometry.shape), crs=CRS.from_epsg(4326)
     )
-    # strips.crs = CRS.from_epsg(4326)
     strips["geometry"] = gpd.GeoSeries.from_wkb(
         strips["geometry"].to_wkb(output_dimension=2)
     )
@@ -771,13 +767,6 @@ def generate_difference(dem_path: Path, verbose: bool = False):
     return output_dh_path, output_dhdt_path
 
 
-    # windows = np.ravel([[rio.windows.Window(col_off, row_off, min(shape[1] - col_off, block_size[0]), min(shape[0] - row_off, block_size[1])) for col_off in np.arange(0, shape[1], step=block_size[0])] for row_off in np.arange(0, shape[0], step=block_size[1])])
-
-
-    # slope.save("temp/npi_slope.tif")
-    # maxc.save("temp
-
-
 def process_all(show_progress_bar: bool = True):
     strips = get_strips()
 
@@ -787,10 +776,6 @@ def process_all(show_progress_bar: bool = True):
     # Build these first (or conversely, check that they exist)
     build_npi_mosaic(verbose=(not show_progress_bar))
     build_stable_terrain_mask(verbose=(not show_progress_bar))
-    # Drønbreen
-    # poi = shapely.geometry.box(538286, 8669555,544315,8675416)
-    # Tinkarpbreen
-    # poi = shapely.geometry.box(548766,8655934,553271,8659162)
 
     # Remove the northern part of Isfjorden for Nordenskiold because it's too small to use.
     if REGION == "nordenskiold":

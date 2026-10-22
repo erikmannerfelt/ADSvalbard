@@ -22,20 +22,11 @@ import adsvalbard.utilities
 from adsvalbard.constants import CONSTANTS
 
 
-        # plt.hist(data["stable_terrain_nmad"], bins=50)
-        # plt.show()
-
-        # print(data)
-        #
-        #
-        #
-
 def process_chunk(filepath: Path, input_filepaths: dict[Path, threading.Lock], outlier_proba_dir: Path, bounds: rasterio.coords.BoundingBox, res: float, crs: object, outlier_threshold: float, v_clip: float, progress_bar: tqdm.tqdm | None = None, vertical_shifts: pd.DataFrame | None = None):
     shape = adsvalbard.utilities.shape_from_bounds_res(bounds=bounds, res=[res] * 2)
     transform = rasterio.transform.from_origin(bounds.left, bounds.top, res, res)
 
     dtypes = {"median": "float32", "count": "uint8", "nmad": "float32", "doy": "uint16"}
-    # output_paths = {"median": filepath}
     output_paths = {kind: filepath.with_stem(filepath.stem + (f"_{kind}" if kind != "median" else "")) for kind in dtypes}
     temp_paths = {kind: fp.with_name(fp.name + ".tmp") for kind, fp in output_paths.items()}
 
@@ -47,16 +38,14 @@ def process_chunk(filepath: Path, input_filepaths: dict[Path, threading.Lock], o
                 crs=crs,
                 transform=transform,
                 compress="deflate",
-                # BIGTIFF="YES",
                 tiled=True,
                 zlevel=12,
     )
     def write_params(kind: str) -> dict[str, object]:
         params = orig_params.copy()
 
-        # params["fp"] = temp_paths[kind]
         params["dtype"] = dtypes[kind]
-        
+
         if dtypes[kind] == "float32":
             params.update(
                 {
@@ -80,7 +69,7 @@ def process_chunk(filepath: Path, input_filepaths: dict[Path, threading.Lock], o
             if vertical_shifts is not None:
                 if path.stem.split("_dem_")[0] not in vertical_shifts.index:
                     continue
-            
+
             with rasterio.open(path) as raster:
                 raster_win = rasterio.windows.from_bounds(
                     *bounds, raster.transform
@@ -150,21 +139,6 @@ def process_chunk(filepath: Path, input_filepaths: dict[Path, threading.Lock], o
 
     del data
 
-    # if np.count_nonzero(np.isfinite(median)) == 0:
-    #     if progress_bar is not None:
-    #         progress_bar.update()
-    #     return
-
-    # median[~np.isfinite(median)] = -9999
-
-        # print(window.row_off, window.row_off + window.height, window.col_off,window.col_off + window.width)
-        # if write_in_mem:
-        #     for kind, arr in [("median", median), ("count", count), ("nmad", nmad)]:
-        #         stacks[kind][
-        #             window.row_off : window.row_off + window.height,
-        #             window.col_off : window.col_off + window.width,
-        #         ] = arr
-        # else:
     for kind, arr in [("median", median), ("nmad", nmad), ("count", count), ("doy", doy)]:
         if dtypes[kind] == "float32":
             arr = np.where(np.isfinite(arr), arr, -9999)
@@ -174,15 +148,9 @@ def process_chunk(filepath: Path, input_filepaths: dict[Path, threading.Lock], o
 
         shutil.move(temp_paths[kind], output_paths[kind])
 
-            
-        # if dtypes[kind] == "uint8":
-        #     out_rasters[kind].write(arr, 1, window=window)
-        # else:
-        #     out_rasters[kind].write(, 1, window=window)
-
     if progress_bar is not None:
         progress_bar.update()
-        
+
 def process_chunk_wrapper(args):
     return process_chunk(**args)
 
@@ -198,7 +166,7 @@ def get_chunk_filepath(i: int,output_vrt_path: Path, region: str = "svalbard", c
     n_zero_pads = int(np.ceil(np.log10(max(n_col_chunks, n_row_chunks))) + 1)
     col = i % n_col_chunks
     row = int((i - col) / n_col_chunks) 
-    
+
     return output_vrt_path.parent / f"{output_vrt_path.stem}_chunks_{chunksize}/chunk_{str(row).zfill(n_zero_pads)}_{str(col).zfill(n_zero_pads)}.tif"
 
 def create_median_stack(
@@ -284,13 +252,10 @@ def create_median_stack(
         vertical_shifts = pd.read_csv(temp_dir / f"vertcoreg_results/vertcoreg_results_{years[0]}{vertcoreg_label}.csv", index_col=0).squeeze()
         vertical_shifts = vertical_shifts[vertical_shifts["n_comparisons"] > 60]
 
-        # print("SKIPPING REMOVAL OF EXTRA VERTCOREG BAD STRIPS")
         bad_titles = list(set(bad_titles + (CONSTANTS.exclusions_dir / "bad_dems_dem_vertcoreg.txt").read_text().splitlines()))
-        
 
     else:
         raise NotImplementedError(f"Unknown raster type: {raster_type}")
-
 
     strips = adsvalbard.arcticdem.get_strips("svalbard")
     strips = strips[pd.to_datetime(strips["datetime"]).dt.year.isin(years)]
@@ -339,13 +304,9 @@ def create_median_stack(
             }
         )
 
-
     centerpoint = 549457, 8641637 # Kjellstromdalen
     centerpoint = 654172, 8883410 # Austfonna NW margin
     centerpoint = 673467, 8881915 # Austfonna camp
-    # centerpoint = 673467, 8866343 # Austfonna ETN-6
-    # centerpoint = 709147, 8872572 # East Austfonna
-    # centerpoint = 723077, 8872572 # East-east Austfonna
     def sort_chunk(chunk):
 
         easting = np.mean([chunk["bounds"].right, chunk["bounds"].left])
@@ -353,12 +314,6 @@ def create_median_stack(
 
         return ((easting - centerpoint[0]) ** 2 + (northing - centerpoint[1]) ** 2) ** 2
 
-    # def sort_chunk(chunk):
-
-    #     easting = np.mean([chunk["bounds"].right, chunk["bounds"].left])
-    #     northing = np.mean([chunk["bounds"].top, chunk["bounds"].bottom])
-
-    #     return ((easting - 673248) ** 2 + (northing - 8901729) ** 2) ** 2
     if nchunks_override is not None:
         chunks.sort(key=sort_chunk)
         chunks = chunks[:nchunks_override]
@@ -372,12 +327,9 @@ def create_median_stack(
                 continue
 
         chunks_to_process.append(chunk)
-    # chunks_to_process.sort(key=sort_chunk)
-
 
     if len(chunks_to_process) > 0:
         chunks_to_process[-1]["filepath"].parent.mkdir(exist_ok=True, parents=True)
-
 
     locks = {}
     for chunk in chunks_to_process:
@@ -391,23 +343,14 @@ def create_median_stack(
                 filepath = raster_dir / f"{strip.title}{pattern.replace('*', '')}"
 
                 if not filepath.is_file():
-                    # warnings.warn(f"{filepath} is missing.")
                     continue
 
                 if filepath not in locks:
                     locks[filepath] = threading.Lock()
 
-                # chunk["input_filepaths"][filepath] = locks[filepath]
                 chunk["input_filepaths"][filepath] = None
                 # chunk["input_filepaths"].append(c
 
-                 
-           # filepaths = Path(
-           #
-        
-        # print(overlapping_strips.iloc[0])
-        #
-        # 
     call_args = []
     for chunk in chunks_to_process:
         call_args.append({
@@ -427,38 +370,6 @@ def create_median_stack(
                 progress_bar.update(1)
     elif len(call_args) > 0:
         tqdm.contrib.concurrent.process_map(process_chunk_wrapper, call_args, max_workers=n_threads, smoothing=0.1)
-
-        # with concurrent.futures.ProcessPoolExecutor(max_workers=n_threads) as executor, \
-             # warnings.catch_warnings():
-            # warnings.filterwarnings("ignore", message=".*All-NaN slice.*")
-            # 
-            # for _ in executor.map(process_chunk_wrapper, call_args):
-            #     progress_bar.update(1)
-
-    # with tqdm.tqdm(total=len(chunks_to_process)) as progress_bar:
-    #     funcs = []
-    #     for chunk in chunks_to_process:
-    #         funcs.append(
-    #             functools.partial(
-    #                 process_chunk,
-    #                 **chunk,
-    #                 res=res,
-    #                 crs=crs,
-    #                 outlier_threshold=outlier_threshold,
-    #                 v_clip=v_clip,
-    #                 outlier_proba_dir=temp_dir / "outlier_proba",
-    #                 progress_bar=progress_bar,
-    #             )
-    #         )
-
-    #     if n_threads == 1 or len(chunks_to_process) == 1:
-    #         for func in funcs:
-    #             func()
-    #     else:
-    #         with concurrent.futures.ThreadPoolExecutor(max_workers=n_threads) as executor,warnings.catch_warnings():
-    #             warnings.filterwarnings("ignore", message=".*All-NaN slice.*")
-    #             list(executor.map(lambda f: f(), funcs))
-
 
     kinds = ["median", "nmad", "count", "doy"]
 
@@ -482,7 +393,7 @@ def make_chunk_polygons():
     import rasterio as rio
     import adsvalbard.rasters
     import shapely.geometry
-    
+
     temp_dir = CONSTANTS.temp_dir.with_stem("temp.svalbard")
     res = CONSTANTS.res
     bounds = rio.coords.BoundingBox(**CONSTANTS.regions["svalbard"])
@@ -515,7 +426,7 @@ def remove_bad_dem_chunks():
     import shapely.geometry
     import adsvalbard.arcticdem
     import adsvalbard.rasters
-    
+
     strips = adsvalbard.arcticdem.get_strips("svalbard")
     temp_dir = CONSTANTS.temp_dir.with_stem("temp.svalbard")
     bad_titles = (CONSTANTS.exclusions_dir / "bad_dems.txt").read_text().splitlines()
@@ -546,8 +457,6 @@ def remove_bad_dem_chunks():
         year_strips = strips[strips["year"] == year]
         # Loop over all product types
         for product in ["dem", "dem_noncoreg", "dem_vertcoreg"]:
-            # if product != "dem_vertcoreg":
-            #     continue
             # Extract only the bad strips for this year and product
             bad_strips = year_strips[year_strips["title"].isin(bad_titles[product])]
             # Skip if there are no bad strips
@@ -561,7 +470,7 @@ def remove_bad_dem_chunks():
                 # Skip if there are no bad and overlapping strips
                 if overlapping_strips.shape[0] == 0:
                     continue
-            
+
                 # Plan to remove both the filtered versions
                 thresholds = ["_filt_075", "_filt_095"] if product == "dem" else [""]
                 for threshold in thresholds:
@@ -589,12 +498,3 @@ def remove_bad_dem_chunks():
         os.remove(filepath)
 
 
-    # plt.hist(vals, bins=10)
-    # plt.show()
-
-
-            
-
-        
-
-    
