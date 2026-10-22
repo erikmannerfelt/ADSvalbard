@@ -174,28 +174,6 @@ def download_json(url: str) -> dict[str, Any]:
     return json.loads(response.content)
 
 
-def get_data_dir(label: str) -> Path:
-    """
-    Get the data directory for the given label.
-
-    Parameters
-    ----------
-    label
-        The label of the subdirectory in the main data directory
-
-    Returns
-    -------
-    The full path to the label.
-    """
-    data_base_dir = CONSTANTS.data_dir
-    if label in ["ArcticDEM", "IC2"]:
-        subdir = label
-    else:
-        raise ValueError(f"Unknown data dir label: {label}")
-
-    return data_base_dir.joinpath(subdir)
-
-
 def download_large_file(
     url: str, filename: str | None = None, directory: Path | str | None = None
 ) -> Path:
@@ -272,64 +250,6 @@ def shape_from_bounds_res(
     return int((bounds.top - bounds.bottom) / res[1]), int(
         (bounds.right - bounds.left) / res[0]
     )
-
-
-def res_from_bounds_shape(
-    bounds: rasterio.coords.BoundingBox, shape: tuple[int, int]
-) -> tuple[float, float]:
-    """
-    Get the resolution of a raster based on its bounding box and shape.
-
-    Parameters
-    ----------
-    bounds
-        The bounding box of the raster.
-    shape
-        The shape of the raster (height, width)
-
-    Examples
-    --------
-    >>> bounds = rasterio.coords.BoundingBox(0, 0, 10, 10)
-    >>> res_from_bounds_shape(bounds, (10, 10))
-    (1.0, 1.0)
-    >>> res_from_bounds_shape(bounds, (1, 10))
-    (1.0, 10.0)
-
-    Returns
-    -------
-    The resolution in [X, Y] of the raster.
-    """
-    return (bounds.right - bounds.left) / shape[1], (
-        bounds.top - bounds.bottom
-    ) / shape[0]
-
-
-def generate_eastings_northings(
-    bounds: rasterio.coords.BoundingBox, shape: tuple[int, int]
-) -> tuple[np.ndarray, np.ndarray]:
-    """Calculate easting/northing pixel midpoint coordinates for the given bounds and shape.
-
-    Parameters
-    ----------
-    bounds
-        The bounding box of the raster.
-    shape
-        The shape of the raster (height, width)
-
-    Returns
-    -------
-    A tuple of (eastings, northings), where eastings.shape == shape. The coordinates represent the center of the pixels.
-
-    """
-    res = res_from_bounds_shape(bounds=bounds, shape=shape)
-
-    eastings, northings = np.meshgrid(
-        np.linspace(bounds.left + res[1] / 2, bounds.right - res[1] / 2, shape[1]),
-        np.linspace(bounds.bottom + res[0] / 2, bounds.top - res[0] / 2, shape[0])[
-            ::-1
-        ],
-    )
-    return eastings, northings
 
 
 def warp_bounds(

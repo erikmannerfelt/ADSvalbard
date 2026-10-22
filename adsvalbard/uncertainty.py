@@ -86,7 +86,6 @@ def sample_points(n_points: int = int(1e6), redo: bool = False):
     return gpd.read_feather(out_path)
 
 
-
 def make_err_function(points: gpd.GeoDataFrame, pred_col: str, var_cols: list[str]):
 
     bins = {}
@@ -422,12 +421,16 @@ def check_bad_pts(prefix: str = "", gui: bool = False):
     joined["datetime"] = pd.to_datetime(joined["datetime"])
     joined["year"] = joined["datetime"].dt.year + joined["datetime"].dt.month / 12
 
-    vertcoreg_results = []
-    for filepath in Path("temp.svalbard/vertcoreg_results/").glob("*.csv"):
-        new = pd.read_csv(filepath, index_col=0)
-        vertcoreg_results.append(new)
-
-    vertcoreg_results = pd.concat(vertcoreg_results)
+    # The original strips are screened before any vertical co-registration exists, and the
+    # rigid pass only uses it to skip vertically co-registered strips, so only the
+    # vertical pass requires it
+    vertcoreg_paths = sorted(Path("temp.svalbard/vertcoreg_results/").glob("*.csv"))
+    if len(vertcoreg_paths) > 0:
+        vertcoreg_results = pd.concat([pd.read_csv(filepath, index_col=0) for filepath in vertcoreg_paths])
+    elif prefix == "dem_vertcoreg":
+        raise FileNotFoundError("No vertical co-registration results to screen; run vert_coreg first")
+    else:
+        vertcoreg_results = pd.DataFrame()
 
     crs = strips.crs
     apply_matchtag = True
@@ -592,12 +595,6 @@ def _pad_bounds(bounds: rio.coords.BoundingBox, pad: float) -> rio.coords.Boundi
         right=bounds.right + pad,
         top=bounds.top + pad,
     )
-
-
-def _window_from_bounds(bounds: rio.coords.BoundingBox, transform) -> rio.windows.Window:
-    return rio.windows.from_bounds(
-        bounds.left, bounds.bottom, bounds.right, bounds.top, transform=transform
-    ).round_offsets().round_lengths()
 
 
 def calculate_max_abs_curvature_chunk(

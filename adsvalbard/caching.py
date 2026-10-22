@@ -9,7 +9,6 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 import projectfiles
-import xarray as xr
 
 from adsvalbard.constants import CONSTANTS
 
@@ -79,19 +78,6 @@ def load_feather(path: Path) -> gpd.GeoDataFrame:
 
 
 cache_feather = precompile_cache(routine=(save_feather, load_feather, "feather"))
-
-
-def save_nc(path: Path, obj: xr.Dataset):
-    obj.to_netcdf(
-        path, encoding={v: {"zlib": True, "complevel": 5} for v in obj.data_vars}
-    )
-
-
-def load_nc(path: Path) -> xr.Dataset:
-    return xr.open_dataset(path, chunks=512)
-
-
-cache_nc = precompile_cache(routine=(save_nc, load_nc, "nc"))
 
 
 def test_precompile_cache():

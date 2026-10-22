@@ -56,7 +56,7 @@ Intermediate products are written to `temp/` (reference data) and `temp.svalbard
 | 6 | Temporal bias correction of the 2019–2024 trend | `adsvalbard.vert_coreg.temporal_biascorr()` | `mosaics_3584/trend_2019-2024_slope_tcorr.vrt` |
 | 7 | Uncertainty | `python -m adsvalbard.uncertainty`, `adsvalbard.uncertainty.make_fit_err_vrt()`, `python -m adsvalbard.variogram`, `adsvalbard.uncertainty.get_temporal_biascorr_uncertainty()` | `*_baseline_err.vrt`, `*_fit_err.vrt`, `temp.svalbard/uncertainty/` |
 | 8 | Export to GeoTIFF | `./export_mosaics.sh`, then `python -m adsvalbard.doy` | `mosaics_3584/out/*.tif` |
-| 9 | Uncertainty checks on the exported trends | `adsvalbard.uncertainty.patch_method_uncertainty()` | `temp.svalbard/uncertainty/patch_method_*.csv` |
+| 9 | Uncertainty checks and point time series from the exported rasters | `adsvalbard.uncertainty.patch_method_uncertainty()`, `adsvalbard.mosaicking.sample_point_timeseries_trends()` | `temp.svalbard/uncertainty/patch_method_*.csv`, `temp.svalbard/point_timeseries_trends.csv` |
 | 10 | Auxiliary tables | `python export_aux_files.py` | `temp.svalbard/aux_files.zip` |
 
 Strips with implausible elevations at a set of check points
@@ -71,6 +71,9 @@ for the published products rather than regenerated:
 | `exclusions/bad_dems.txt` | Everything (screened on the original strips) |
 | `exclusions/bad_dems_dem.txt` | The rigidly co-registered stacks |
 | `exclusions/bad_dems_dem_vertcoreg.txt` | Vertical co-registration and the vertically corrected stacks |
+
+After a list changes, `adsvalbard.stacking.remove_bad_dem_chunks()` deletes the cached
+stack chunks that contain newly excluded strips, so that stage 5 rebuilds them.
 
 The outlier classifier of stage 4 is evaluated with
 `adsvalbard.filtering.evaluate_gap_model_grouped()`.

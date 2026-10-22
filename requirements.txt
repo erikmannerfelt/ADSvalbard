@@ -5,7 +5,6 @@ odfpy
 pyarrow
 pytest
 rasterio
-rioxarray
 xdem
 fiona
 gdal
