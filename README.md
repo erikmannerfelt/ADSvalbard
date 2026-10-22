@@ -94,6 +94,21 @@ The outlier classifier of stage 4 is evaluated with
 
 The GDAL overviews are average-resampled.
 
+## Processing times
+
+All processing ran on one workstation (AMD Ryzen 9 3950X, 16 cores, 64 GB RAM).
+Stacking ran 2–5 workers in parallel and mosaicking 8, so their totals are wall-clock
+time. The strip stages include the strips from before 2013.
+
+| Stage | Unit | Median | Total |
+|---|---|---|---|
+| Rigid co-registration | per strip (10,424) | 1.5 min | 455 h (19.0 days) |
+| Outlier probability | per strip (10,418) | 14 s | 73 h (3.0 days) |
+| Vertical co-registration | per region-year (72) | 3.1 min | 6 h |
+| Stacking, main product (outlier probability < 0.75) | per year (12) | 11 h | 131 h (5.5 days) |
+| Stacking, all four products |  | – | 414 h (17.2 days) |
+| Mosaicking and trend fitting | 467 chunks | – | 4 h |
+
 ## Repository layout
 
 | Path | Contents |
@@ -109,6 +124,7 @@ The GDAL overviews are average-resampled.
 | `adsvalbard/doy.py` | Day-of-year band repair |
 | `shapes/` | Hand-drawn vector layers |
 | `exclusions/` | Strip exclusion lists |
+| `extra/timings.py` | Processing times from file modification times |
 
 ## Licence
 
