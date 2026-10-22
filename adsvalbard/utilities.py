@@ -1,16 +1,14 @@
 import datetime
-import functools
 import hashlib
 import json
 import os
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 import geopandas as gpd
 import numpy as np
-import projectfiles
 import rasterio as rio
 import rasterio.coords
 import rasterio.transform

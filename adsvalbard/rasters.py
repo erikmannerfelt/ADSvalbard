@@ -1,11 +1,8 @@
-import itertools
-import pickle
 from pathlib import Path
 from typing import Sequence
 import warnings
 
 import geopandas as gpd
-import matplotlib.pyplot as plt
 import numpy as np
 import rasterio as rio
 import rasterio.coords
@@ -13,7 +10,6 @@ import rasterio.features
 import rasterio.transform
 import rasterio.warp
 import rasterio.windows
-import shapely.geometry
 from osgeo import gdal
 from tqdm import tqdm
 

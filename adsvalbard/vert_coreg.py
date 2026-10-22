@@ -1,4 +1,3 @@
-from adsvalbard.mosaicking import write_formatted
 import rasterio as rio
 import geopandas as gpd
 import pandas as pd
@@ -9,7 +8,6 @@ import warnings
 import tqdm
 import tqdm.contrib.concurrent
 import json
-import tempfile
 
 from pathlib import Path
 from adsvalbard.constants import CONSTANTS
@@ -434,13 +432,11 @@ def main(n_points: int = 5000, verbose: bool = True):
 
 def temporal_biascorr_inner(chunks: gpd.GeoDataFrame, product_str: str, mosaic_dir: Path, year: int, redo: bool = False, max_vcorr_magnitude: float = 0.6, return_first_chunk: bool = False, filepath_override: dict[str, Path] = {}, verbose: bool = True):
     import rasterio as rio
-    import matplotlib.pyplot as plt
     import scipy.ndimage
     import scipy.spatial
     import scipy.interpolate
     import adsvalbard.rasters
     import adsvalbard.mosaicking
-    import shapely.geometry
 
     filepaths = {
         "ocean": mosaic_dir / f"dem_{year}_ocean.vrt",
@@ -700,7 +696,6 @@ def get_temporal_biascorr_fixes() -> list[tuple[float, tuple[float, float, float
 
 def temporal_biascorr(redo: bool = False):
     import rasterio as rio
-    import matplotlib.pyplot as plt
     import shapely.geometry
     from osgeo import gdal
     gdal.UseExceptions()

@@ -4,14 +4,12 @@ import rasterio as rio
 import numpy as np
 import pandas as pd
 import geopandas as gpd
-import warnings
 import time
 import tqdm
 from pathlib import Path
 import math
 from collections import OrderedDict
 
-from rasterio.enums import Resampling
 from rasterio.windows import Window, from_bounds
 
 

@@ -300,7 +300,6 @@ class GapModel:
 
         all_patches = all_patches.dropna(how="all", axis="columns")
 
-        import itertools
 
         import sklearn.inspection
         import sklearn.pipeline
@@ -633,7 +632,6 @@ def create_gap_mask(
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message=".*'nopython' keyword.*")
         import xdem
-    import geoutils as gu
     import scipy.ndimage
 
     update("Loading DEM")

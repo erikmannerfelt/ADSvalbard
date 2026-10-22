@@ -9,9 +9,7 @@ import time
 import warnings
 from pathlib import Path
 
-import dask
 
-import dask.dataframe as dd
 import geopandas as gpd
 import geoutils as gu
 import numba
@@ -24,7 +22,6 @@ import requests
 import scipy.ndimage
 import scipy.optimize
 import shapely.geometry
-import skimage
 from osgeo import gdal
 from pyproj import CRS
 from tqdm import tqdm

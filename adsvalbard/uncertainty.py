@@ -974,7 +974,6 @@ def get_temporal_biascorr_uncertainty(verbose: bool = True, include_neff_standar
     import adsvalbard.mosaicking
     import scipy.optimize
     import scipy.ndimage
-    import matplotlib.pyplot as plt
 
     per_area, per_distance = get_temporal_biascorr_uncertainty_relationship(redo=False)
 

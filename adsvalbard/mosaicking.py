@@ -774,7 +774,6 @@ def mosaic_all_tiles(chunksize: int = 512 * 7, n_workers: int | None = 8, redo =
                     chunk_nrs = new_chunk_nrs
                 else:
                     chunk_nrs = [ch for ch in new_chunk_nrs if ch in chunk_nrs]
-    import os
 
     chunk_nrs.sort()
 

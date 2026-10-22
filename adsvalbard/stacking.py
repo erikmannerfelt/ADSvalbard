@@ -3,14 +3,11 @@ import shutil
 import warnings
 from pathlib import Path
 import threading
-import functools
 
-import dask
 import geopandas as gpd
 import numpy as np
 import pandas as pd
 import tqdm
-import tqdm.dask
 import tqdm.contrib.concurrent
 
 import rasterio
@@ -184,9 +181,6 @@ def create_median_stack(
     import rasterio as rio
     import rasterio.transform
     import shapely.geometry
-    import contextlib
-    import random
-    import concurrent.futures
     from osgeo import gdal
 
     import adsvalbard.arcticdem

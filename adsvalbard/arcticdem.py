@@ -1,16 +1,13 @@
 import concurrent.futures
 import datetime
 import os
-import tempfile
 from typing import Any
 
 import geopandas as gpd
-import lxml.etree as ET
 import numpy as np
 import pandas as pd
 import rasterio as rio
 import shapely
-import xarray as xr
 from tqdm import tqdm
 
 import adsvalbard.caching
