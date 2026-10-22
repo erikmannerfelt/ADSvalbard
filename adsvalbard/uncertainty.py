@@ -1,5 +1,4 @@
 import tempfile
-from adsvalbard import outlines, vert_coreg
 from adsvalbard.constants import CONSTANTS
 import rasterio as rio
 import pandas as pd
@@ -18,6 +17,7 @@ import matplotlib.pyplot as plt
 
 import adsvalbard.utilities
 import adsvalbard.rasters
+import adsvalbard.vert_coreg
 
 
 def get_temp_dir() -> Path:

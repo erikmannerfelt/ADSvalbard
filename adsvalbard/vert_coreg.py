@@ -1,5 +1,4 @@
 from adsvalbard.mosaicking import write_formatted
-from adsvalbard.outlines import generate_full_glacier_mask
 import rasterio as rio
 import geopandas as gpd
 import pandas as pd
