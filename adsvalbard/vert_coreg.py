@@ -77,8 +77,8 @@ def coregister_vert_year(year: int, bounds: rio.coords.BoundingBox, label: str |
     all_strips["datetime"] = pd.to_datetime(all_strips["datetime"])
     all_strips = all_strips[all_strips["datetime"].dt.year == year]
 
-    bad_titles = Path("temp.svalbard/bad_dems.txt").read_text().splitlines()
-    bad_titles = list(set(bad_titles + Path("temp.svalbard/bad_dems_dem_vertcoreg.txt").read_text().splitlines()))
+    bad_titles = (CONSTANTS.exclusions_dir / "bad_dems.txt").read_text().splitlines()
+    bad_titles = list(set(bad_titles + (CONSTANTS.exclusions_dir / "bad_dems_dem_vertcoreg.txt").read_text().splitlines()))
     all_strips = all_strips[~all_strips["title"].isin(bad_titles)]
 
     all_strips = all_strips[all_strips.intersects(bounds_shp)]
@@ -495,8 +495,8 @@ def summarize_vertcoreg_support(
     strips = gpd.read_feather("temp.svalbard/strip-meta.feather")
     strips["year"] = pd.to_datetime(strips["datetime"]).dt.year
     # The same exclusions as in coregister_vert_year
-    bad_titles = set(Path("temp.svalbard/bad_dems.txt").read_text().splitlines())
-    bad_titles |= set(Path("temp.svalbard/bad_dems_dem_vertcoreg.txt").read_text().splitlines())
+    bad_titles = set((CONSTANTS.exclusions_dir / "bad_dems.txt").read_text().splitlines())
+    bad_titles |= set((CONSTANTS.exclusions_dir / "bad_dems_dem_vertcoreg.txt").read_text().splitlines())
     strips = strips[~strips["title"].isin(bad_titles)]
     regions = gpd.read_file("shapes/bad_coreg_regions.geojson").to_crs(strips.crs).set_index("label")
 

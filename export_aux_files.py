@@ -69,11 +69,11 @@ def main():
 
         zip_file.writestr(
             "excluded_dems_rigidcoreg.txt",
-            build_exclusion_list("temp.svalbard/bad_dems.txt", "temp.svalbard/bad_dems_dem.txt"),
+            build_exclusion_list("exclusions/bad_dems.txt", "exclusions/bad_dems_dem.txt"),
         )
         zip_file.writestr(
             "excluded_dems_vertcoreg.txt",
-            build_exclusion_list("temp.svalbard/bad_dems.txt", "temp.svalbard/bad_dems_dem_vertcoreg.txt"),
+            build_exclusion_list("exclusions/bad_dems.txt", "exclusions/bad_dems_dem_vertcoreg.txt"),
         )
 
         for name in inner_zips:

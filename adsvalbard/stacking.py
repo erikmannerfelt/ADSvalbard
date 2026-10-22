@@ -941,7 +941,7 @@ def create_median_stack(
         raise TypeError(f"{years=} has unknown type: {type(years)=}")
 
     filt_str = f"filt_{str(int(outlier_threshold * 100)).zfill(3)}"
-    bad_titles = Path("temp.svalbard/bad_dems.txt").read_text().splitlines()
+    bad_titles = (CONSTANTS.exclusions_dir / "bad_dems.txt").read_text().splitlines()
 
     vertical_shifts = None
 
@@ -957,7 +957,7 @@ def create_median_stack(
         v_clip = 1500
         pattern = "*_dem_coreg.tif"
         dirs = [raster_dir]
-        bad_titles = list(set(bad_titles + Path("temp.svalbard/bad_dems_dem.txt").read_text().splitlines()))
+        bad_titles = list(set(bad_titles + (CONSTANTS.exclusions_dir / "bad_dems_dem.txt").read_text().splitlines()))
     elif raster_type == "dem_noncoreg":
         output_path = temp_dir / f"medians/{region}/dem_noncoreg/median_dem{ext}.vrt"
         v_clip = 1500
@@ -982,7 +982,7 @@ def create_median_stack(
         vertical_shifts = vertical_shifts[vertical_shifts["n_comparisons"] > 60]
 
         # print("SKIPPING REMOVAL OF EXTRA VERTCOREG BAD STRIPS")
-        bad_titles = list(set(bad_titles + Path("temp.svalbard/bad_dems_dem_vertcoreg.txt").read_text().splitlines()))
+        bad_titles = list(set(bad_titles + (CONSTANTS.exclusions_dir / "bad_dems_dem_vertcoreg.txt").read_text().splitlines()))
         
 
     else:
@@ -1217,9 +1217,9 @@ def remove_bad_dem_chunks():
     
     strips = adsvalbard.arcticdem.get_strips("svalbard")
     temp_dir = CONSTANTS.temp_dir.with_stem("temp.svalbard")
-    bad_titles = Path("temp.svalbard/bad_dems.txt").read_text().splitlines()
-    bad_coreg_titles = (temp_dir / "bad_dems_dem.txt").read_text().splitlines()
-    bad_vertcoreg_titles = (temp_dir / "bad_dems_dem_vertcoreg.txt").read_text().splitlines()
+    bad_titles = (CONSTANTS.exclusions_dir / "bad_dems.txt").read_text().splitlines()
+    bad_coreg_titles = (CONSTANTS.exclusions_dir / "bad_dems_dem.txt").read_text().splitlines()
+    bad_vertcoreg_titles = (CONSTANTS.exclusions_dir / "bad_dems_dem_vertcoreg.txt").read_text().splitlines()
 
     bad_titles = {
         "dem_noncoreg": bad_titles,

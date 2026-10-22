@@ -14,6 +14,9 @@ class Constants(projectfiles.Constant):
     cache_dir = Path(__file__).parent.parent.joinpath(".cache")
     data_dir = Path(__file__).parent.parent.joinpath("data")
     temp_dir = Path(__file__).parent.parent.joinpath("temp")
+    # Strip exclusion lists written by `uncertainty.check_bad_pts()`; versioned because
+    # they result from an iterative screening that a clean run would not reproduce
+    exclusions_dir = Path(__file__).parent.parent.joinpath("exclusions")
     res: float = 5.0
     coreg_res: float = 5.0
     crs_epsg: int = 32633

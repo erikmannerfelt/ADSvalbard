@@ -537,7 +537,7 @@ def check_bad_pts(prefix: str = "", gui: bool = False):
 
     if len(prefix) > 0:
         prefix = f"_{prefix}"
-    Path(f"temp.svalbard/bad_dems{prefix}.txt").write_text("\n".join(sorted(bad_titles)))
+    (CONSTANTS.exclusions_dir / f"bad_dems{prefix}.txt").write_text("\n".join(sorted(bad_titles)))
 
     if gui:
         import matplotlib.pyplot as plt
